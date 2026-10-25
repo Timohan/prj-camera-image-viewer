@@ -1,0 +1,83 @@
+#include "distance_model.h"
+#include <cmath>
+#include <thread>
+#include "global_log.h"
+
+#define MM_PER_METER        1000.0
+// colors 0..1 are moved to -0.5..0.5 like in the training of prj-camera-image-learner (ImageSamples)
+#define COLOR_OFFSET        0.5f
+
+DistanceModel::DistanceModel() :
+    m_targetMean(0.0f),
+    m_targetScale(1.0f)
+{
+}
+
+/*!
+ * \brief DistanceModel::load
+ * \param filename model file of prj-camera-image-learner
+ * \return true on success
+ */
+bool DistanceModel::load(const std::string &filename)
+{
+    m_network = VisionTransformer::load(filename, &m_targetMean, &m_targetScale);
+    if (!m_network) {
+        return false;
+    }
+    const VisionTransformer::Config &config = m_network->getConfig();
+    TG_DEBUG_LOG("Model", filename + ":", std::to_string(config.width) + "x" + std::to_string(config.height), "pixels,",
+                 std::to_string(config.patchSize) + "x" + std::to_string(config.patchSize), "tokens,",
+                 m_network->getParameterCount(), "weights");
+    return true;
+}
+
+/*!
+ * \brief DistanceModel::predict
+ * predicts the distances of the images, every image in its own thread
+ * \param images RGB images, they must fit into the image size of the model
+ * \return distance (mm) of every pixel of every image, empty list for an image that does not fit
+ */
+std::vector<std::vector<double>> DistanceModel::predict(const std::vector<const cv::Mat *> &images) const
+{
+    std::vector<std::vector<double>> result(images.size());
+    const VisionTransformer::Config &config = m_network->getConfig();
+    auto predictImage = [&](size_t index) {
+        const cv::Mat &image = *images[index];
+        if (image.cols > config.width || image.rows > config.height) {
+            TG_ERROR_LOG("Image is", std::to_string(image.cols) + "x" + std::to_string(image.rows),
+                         "but the model is for", std::to_string(config.width) + "x" + std::to_string(config.height));
+            return;
+        }
+        // image is padded with 0 on the right and bottom to the size of the model
+        const size_t pixels = static_cast<size_t>(config.width)*config.height;
+        std::vector<float> input(pixels*3, 0.0f), output(pixels);
+        for (int y=0;y<image.rows;y++) {
+            const cv::Vec3b *row = image.ptr<cv::Vec3b>(y);
+            for (int x=0;x<image.cols;x++) {
+                float *pixel = input.data() + (static_cast<size_t>(y)*config.width + x)*3;
+                for (int c=0;c<3;c++) {
+                    pixel[c] = static_cast<float>(row[x][c])/255.0f - COLOR_OFFSET;
+                }
+            }
+        }
+        VisionTransformer::Workspace workspace(*m_network);
+        m_network->forward(&workspace, input.data(), output.data());
+        std::vector<double> &distances = result[index];
+        distances.resize(static_cast<size_t>(image.cols)*image.rows);
+        for (int y=0;y<image.rows;y++) {
+            for (int x=0;x<image.cols;x++) {
+                const float value = output[static_cast<size_t>(y)*config.width + x];
+                distances[static_cast<size_t>(y)*image.cols + x] =
+                    std::exp(static_cast<double>(value*m_targetScale + m_targetMean))*MM_PER_METER;
+            }
+        }
+    };
+    std::vector<std::thread> threads;
+    for (size_t i=0;i<images.size();i++) {
+        threads.emplace_back(predictImage, i);
+    }
+    for (std::thread &thread : threads) {
+        thread.join();
+    }
+    return result;
+}
