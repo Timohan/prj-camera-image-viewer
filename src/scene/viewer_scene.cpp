@@ -69,13 +69,13 @@ bool ViewerScene::load(const std::string &imageDirectory, const std::string &sce
         images.push_back(&image->getImage());
     }
     const auto start = std::chrono::steady_clock::now();
-    const std::vector<std::vector<double>> distances = model.predict(images);
+    const std::vector<DistanceModel::Prediction> predictions = model.predict(images);
     TG_DEBUG_LOG("Distances predicted in", std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), "s");
     for (size_t i=0;i<m_listCameraImage.size();i++) {
-        if (distances[i].empty()) {
+        if (predictions[i].distances.empty()) {
             return false;
         }
-        m_listCameraImage[i]->setPredictedDistances(distances[i]);
+        m_listCameraImage[i]->setPrediction(predictions[i].distances, predictions[i].sky);
     }
     moveToCamera(0);
     return true;

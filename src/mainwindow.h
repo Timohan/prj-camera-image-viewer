@@ -1,7 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
-#include <string>
+#include <memory>
 #include <window/tg_mainwindow.h>
 #include "scene/viewer_scene.h"
 #include "scene/view_key_listener.h"
@@ -9,9 +9,8 @@
 class MainWindow : public TgMainWindow
 {
 public:
-    MainWindow(int width, int height);
-
-    bool load(const std::string &imageDirectory, const std::string &scene, const std::string &modelFile);
+    // viewerScene must be loaded, the window is created only after it, so a failed load does not need a window
+    MainWindow(int width, int height, std::unique_ptr<ViewerScene> viewerScene);
 
 protected:
     virtual int initCustomShader() override;
@@ -19,7 +18,7 @@ protected:
     virtual void customRender() override;
 
 private:
-    ViewerScene m_viewerScene;
+    std::unique_ptr<ViewerScene> m_viewerScene;
     ViewKeyListener m_viewKeyListener;
 };
 

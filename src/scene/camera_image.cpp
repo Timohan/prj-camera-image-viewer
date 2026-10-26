@@ -13,12 +13,8 @@
 #define SKY_DISTANCE_MM             1.0e12
 // sky and the predicted pixels above the horizon are put this far (mm)
 #define FAR_DISTANCE_MM             500000.0
-// predicted pixels whose ray goes up at least this much (y of the normalized ray) are above the horizon
-#define HORIZON_RAY_Y               0.0
 // triangle is not made, if its largest distance is this many times its smallest distance (edge of an object)
 #define DISTANCE_JUMP_RATIO         1.15
-// predicted surfaces above the horizon are at most this high (mm), the cubes of the scenes are lower
-#define MAX_SURFACE_HEIGHT_MM       6000.0
 // camera and lens information block after the distances in the data file
 #define DATA_CAMERA_INFO_MAGIC      "CAMI"
 #define DATA_CAMERA_INFO_VERSION    2
@@ -138,9 +134,15 @@ bool CameraImage::readData(const std::string &filename)
     return true;
 }
 
-void CameraImage::setPredictedDistances(const std::vector<double> &distances)
+/*!
+ * \brief CameraImage::setPrediction
+ * \param distances predicted distance (mm) of every pixel
+ * \param sky 1 if the model predicted that the pixel is sky
+ */
+void CameraImage::setPrediction(const std::vector<double> &distances, const std::vector<uint8_t> &sky)
 {
     m_predictedDistances = distances;
+    m_predictedSky = sky;
 }
 
 /*!
@@ -162,50 +164,36 @@ int CameraImage::createMeshes(GLint vertexAttribute, GLint textureCoordinateAttr
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
-    if (createMesh(m_correctDistances, true, vertexAttribute, textureCoordinateAttribute, &m_correctMesh) != 0) {
+    // sky of the data file is very far or 0 (pixel sees nothing)
+    std::vector<uint8_t> correctSky(m_correctDistances.size());
+    for (size_t i=0;i<m_correctDistances.size();i++) {
+        correctSky[i] = m_correctDistances[i] <= 0.0 || m_correctDistances[i] >= SKY_DISTANCE_MM ? 1 : 0;
+    }
+    if (createMesh(m_correctDistances, correctSky, vertexAttribute, textureCoordinateAttribute, &m_correctMesh) != 0) {
         return 1;
     }
-    return createMesh(m_predictedDistances, false, vertexAttribute, textureCoordinateAttribute, &m_predictedMesh);
+    return createMesh(m_predictedDistances, m_predictedSky, vertexAttribute, textureCoordinateAttribute, &m_predictedMesh);
 }
 
 /*!
  * \brief CameraImage::createMesh
  * \param distances distance (mm) of every pixel
- * \param correct true: distances are correct (sky is marked), false: predicted (pixels above the horizon are sky)
+ * \param sky 1 if the pixel is sky, it is put far away
  * \return 0 on success
  */
-int CameraImage::createMesh(const std::vector<double> &distances, bool correct, GLint vertexAttribute,
+int CameraImage::createMesh(const std::vector<double> &distances, const std::vector<uint8_t> &sky, GLint vertexAttribute,
                             GLint textureCoordinateAttribute, Mesh *mesh)
 {
     const int width = m_image.cols;
     const int height = m_image.rows;
-    if (distances.size() != static_cast<size_t>(width)*height) {
+    if (distances.size() != static_cast<size_t>(width)*height || sky.size() != distances.size()) {
         TG_ERROR_LOG("Camera", m_cameraNumber, "has no distances");
         return 1;
     }
     // distance of every pixel, sky is far away
     std::vector<double> distance(distances.size());
     for (size_t i=0;i<distances.size();i++) {
-        const bool sky = correct ? distances[i] <= 0.0 || distances[i] >= SKY_DISTANCE_MM : m_rays[i].y >= HORIZON_RAY_Y;
-        distance[i] = sky ? FAR_DISTANCE_MM : distances[i];
-    }
-    if (!correct) {
-        // an object that is above the horizon continues upward from the pixels below it: predicted pixel above the horizon
-        // is a surface, if the distance of the surface pixel below it changes smoothly and the point is not too high
-        for (int x=0;x<width;x++) {
-            for (int y=height-2;y>=0;y--) {
-                const size_t i = static_cast<size_t>(y)*width + x;
-                const size_t below = i + static_cast<size_t>(width);
-                if (distance[i] < FAR_DISTANCE_MM || distance[below] >= FAR_DISTANCE_MM) {
-                    continue;
-                }
-                const double ratio = distances[i] > distance[below] ? distances[i]/distance[below] : distance[below]/distances[i];
-                const double height = m_position[1] + distances[i]*m_rays[i].y;
-                if (ratio <= DISTANCE_JUMP_RATIO && height <= MAX_SURFACE_HEIGHT_MM) {
-                    distance[i] = distances[i];
-                }
-            }
-        }
+        distance[i] = sky[i] ? FAR_DISTANCE_MM : distances[i];
     }
     std::vector<float> vertices;
     auto addVertex = [&](int x, int y) {

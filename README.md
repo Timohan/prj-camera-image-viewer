@@ -25,5 +25,5 @@ Keys:
 
 Every pixel is put to the camera position + distance along its ray through the lens (lens distortion of the .dat
 file is used). Neighbouring pixels are joined to triangles, except over a jump of the distance (edges of the objects).
-The model did not learn the sky, so its pixels above the horizon are put far away (sky dome), except the ones that
-continue an object upward from below the horizon. Black areas are places that no camera sees.
+Pixels that the model predicts as sky are put far away (sky dome), so the model must have the sky output
+(prj-camera-image-learner model file version 2). Black areas are places that no camera sees.

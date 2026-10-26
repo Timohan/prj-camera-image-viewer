@@ -25,6 +25,11 @@ bool DistanceModel::load(const std::string &filename)
         return false;
     }
     const VisionTransformer::Config &config = m_network->getConfig();
+    if (!config.skyOutput) {
+        TG_ERROR_LOG(filename, "has no sky output, train a new model with prj-camera-image-learner");
+        m_network.reset();
+        return false;
+    }
     TG_DEBUG_LOG("Model", filename + ":", std::to_string(config.width) + "x" + std::to_string(config.height), "pixels,",
                  std::to_string(config.patchSize) + "x" + std::to_string(config.patchSize), "tokens,",
                  m_network->getParameterCount(), "weights");
@@ -35,11 +40,11 @@ bool DistanceModel::load(const std::string &filename)
  * \brief DistanceModel::predict
  * predicts the distances of the images, every image in its own thread
  * \param images RGB images, they must fit into the image size of the model
- * \return distance (mm) of every pixel of every image, empty list for an image that does not fit
+ * \return distance (mm) and sky of every pixel of every image, empty lists for an image that does not fit
  */
-std::vector<std::vector<double>> DistanceModel::predict(const std::vector<const cv::Mat *> &images) const
+std::vector<DistanceModel::Prediction> DistanceModel::predict(const std::vector<const cv::Mat *> &images) const
 {
-    std::vector<std::vector<double>> result(images.size());
+    std::vector<Prediction> result(images.size());
     const VisionTransformer::Config &config = m_network->getConfig();
     auto predictImage = [&](size_t index) {
         const cv::Mat &image = *images[index];
@@ -50,7 +55,7 @@ std::vector<std::vector<double>> DistanceModel::predict(const std::vector<const 
         }
         // image is padded with 0 on the right and bottom to the size of the model
         const size_t pixels = static_cast<size_t>(config.width)*config.height;
-        std::vector<float> input(pixels*3, 0.0f), output(pixels);
+        std::vector<float> input(pixels*3, 0.0f), output(pixels), skyOutput(pixels);
         for (int y=0;y<image.rows;y++) {
             const cv::Vec3b *row = image.ptr<cv::Vec3b>(y);
             for (int x=0;x<image.cols;x++) {
@@ -61,14 +66,17 @@ std::vector<std::vector<double>> DistanceModel::predict(const std::vector<const 
             }
         }
         VisionTransformer::Workspace workspace(*m_network);
-        m_network->forward(&workspace, input.data(), output.data());
-        std::vector<double> &distances = result[index];
-        distances.resize(static_cast<size_t>(image.cols)*image.rows);
+        m_network->forward(&workspace, input.data(), output.data(), skyOutput.data());
+        Prediction &prediction = result[index];
+        prediction.distances.resize(static_cast<size_t>(image.cols)*image.rows);
+        prediction.sky.resize(prediction.distances.size());
         for (int y=0;y<image.rows;y++) {
             for (int x=0;x<image.cols;x++) {
-                const float value = output[static_cast<size_t>(y)*config.width + x];
-                distances[static_cast<size_t>(y)*image.cols + x] =
-                    std::exp(static_cast<double>(value*m_targetScale + m_targetMean))*MM_PER_METER;
+                const size_t source = static_cast<size_t>(y)*config.width + x;
+                const size_t pixel = static_cast<size_t>(y)*image.cols + x;
+                prediction.distances[pixel] = std::exp(static_cast<double>(output[source]*m_targetScale + m_targetMean))*MM_PER_METER;
+                // sky logit above 0 is probability above 0.5
+                prediction.sky[pixel] = skyOutput[source] > 0.0f ? 1 : 0;
             }
         }
     };

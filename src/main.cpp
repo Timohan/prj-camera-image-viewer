@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <application/tg_application.h>
+#include <memory>
 #include <string>
 #include "mainwindow.h"
 
@@ -66,9 +67,11 @@ int main(int argc , char *argv[])
             return 1;
         }
     }
-    static MainWindow m_mainwindow(1920, 1080);
-    if (!m_mainwindow.load(imageDirectory, scene, modelFile)) {
+    // images are loaded and their distances predicted before the window is created
+    std::unique_ptr<ViewerScene> viewerScene = std::make_unique<ViewerScene>();
+    if (!viewerScene->load(imageDirectory, scene, modelFile)) {
         return 1;
     }
+    static MainWindow m_mainwindow(1920, 1080, std::move(viewerScene));
     return m_application.exec();
 }

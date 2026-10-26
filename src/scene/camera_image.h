@@ -13,9 +13,8 @@
  * correct distances from the data file, predicted distances from the model. The pixels are turned to 3D points
  * (camera position + distance along the ray of the pixel through the lens) and neighbouring points are joined
  * to textured triangles, so the image becomes a 3D surface. Triangles are not made over a jump of the distance
- * (edges of the objects). The model did not learn the sky, so predicted pixels above the horizon are put far away
- * (sky dome), except the ones that continue an object upward from below the horizon.
- * Positions are in opengl units (1000 mm = 1.0).
+ * (edges of the objects). Sky (the correct sky of the data file, or the sky that the model predicted) is put far away
+ * (sky dome). Positions are in opengl units (1000 mm = 1.0).
  */
 class CameraImage
 {
@@ -26,7 +25,7 @@ public:
     CameraImage &operator=(const CameraImage &) = delete;
 
     bool load(const std::string &filename);
-    void setPredictedDistances(const std::vector<double> &distances);
+    void setPrediction(const std::vector<double> &distances, const std::vector<uint8_t> &sky);
     int createMeshes(GLint vertexAttribute, GLint textureCoordinateAttribute);
     void render(bool correctDistances) const;
 
@@ -44,6 +43,7 @@ private:
     cv::Mat m_image;                        // RGB
     std::vector<double> m_correctDistances; // mm, width x height
     std::vector<double> m_predictedDistances;
+    std::vector<uint8_t> m_predictedSky;    // 1 = model predicted sky
     std::vector<VECTOR3> m_rays;            // normalized ray of every pixel in the world
     int m_cameraNumber;
     double m_position[3];                   // mm
@@ -53,7 +53,7 @@ private:
     Mesh m_predictedMesh;
 
     bool readData(const std::string &filename);
-    int createMesh(const std::vector<double> &distances, bool correct, GLint vertexAttribute,
+    int createMesh(const std::vector<double> &distances, const std::vector<uint8_t> &sky, GLint vertexAttribute,
                    GLint textureCoordinateAttribute, Mesh *mesh);
     static void deleteMesh(Mesh *mesh);
 };
