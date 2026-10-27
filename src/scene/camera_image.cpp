@@ -13,12 +13,16 @@
 #define SKY_DISTANCE_MM             1.0e12
 // sky and the predicted pixels above the horizon are put this far (mm)
 #define FAR_DISTANCE_MM             500000.0
-// triangle is not made, if its largest distance is this many times its smallest distance (edge of an object)
+// without the surfaces a triangle is not made, if its largest distance is this many times its smallest distance
+// (edge of an object)
 #define DISTANCE_JUMP_RATIO         1.15
 // camera and lens information block after the distances in the data file
 #define DATA_CAMERA_INFO_MAGIC      "CAMI"
 #define DATA_CAMERA_INFO_VERSION    2
 #define DATA_CAMERA_INFO_VALUES     36
+// surface block after the camera information
+#define DATA_SURFACE_MAGIC          "SURF"
+#define DATA_SURFACE_VERSION        1
 // undistortPoints iterations and accuracy in pixels like in prj-camera-image-creator
 #define UNDISTORT_MAX_ITERATIONS    200
 #define UNDISTORT_EPSILON_PIXELS    0.001
@@ -65,7 +69,9 @@ bool CameraImage::load(const std::string &filename)
  * uint32_t width, height, double distance (mm) of every pixel, char[4] "CAMI", uint32_t version, camera number,
  * distortion model (0 pinhole, 1 fisheye) and 36 doubles: position (mm), direction, up vector, roll, focal length,
  * sensor width/height, resolution width/height, fx, fy, cx, cy, k1-k6, p1-p2, fisheye k1-k4, field of view,
- * aperture, focus distance, yaw, pitch. Then calculates the ray of every pixel through the lens.
+ * aperture, focus distance, yaw, pitch. Then optionally char[4] "SURF", uint32_t version, uint32_t surface number of every
+ * pixel and the normals: neighbouring pixels of the same surface number are connected (0 is the sky).
+ * Then calculates the ray of every pixel through the lens.
  * \return true on success
  */
 bool CameraImage::readData(const std::string &filename)
@@ -94,6 +100,32 @@ bool CameraImage::readData(const std::string &filename)
         return false;
     }
     m_cameraNumber = static_cast<int>(cameraNumber);
+    // older data files have no surfaces
+    m_correctConnections.clear();
+    uint32_t surfaceVersion = 0;
+    file.read(magic, sizeof(magic));
+    file.read(reinterpret_cast<char *>(&surfaceVersion), sizeof(surfaceVersion));
+    if (file && memcmp(magic, DATA_SURFACE_MAGIC, sizeof(magic)) == 0 && surfaceVersion == DATA_SURFACE_VERSION) {
+        std::vector<uint32_t> surfaces(static_cast<size_t>(width)*height);
+        file.read(reinterpret_cast<char *>(surfaces.data()), static_cast<std::streamsize>(surfaces.size()*sizeof(uint32_t)));
+        if (file) {
+            m_correctConnections.assign(surfaces.size(), 0);
+            for (uint32_t y=0;y<height;y++) {
+                for (uint32_t x=0;x<width;x++) {
+                    const size_t i = static_cast<size_t>(y)*width + x;
+                    if (surfaces[i] == 0) {
+                        continue;
+                    }
+                    if (x + 1 < width && surfaces[i + 1] == surfaces[i]) {
+                        m_correctConnections[i] |= ConnectedRight;
+                    }
+                    if (y + 1 < height && surfaces[i + width] == surfaces[i]) {
+                        m_correctConnections[i] |= ConnectedDown;
+                    }
+                }
+            }
+        }
+    }
     for (int i=0;i<3;i++) {
         m_position[i] = values[i];
         m_direction[i] = values[3 + i];
@@ -138,11 +170,14 @@ bool CameraImage::readData(const std::string &filename)
  * \brief CameraImage::setPrediction
  * \param distances predicted distance (mm) of every pixel
  * \param sky 1 if the model predicted that the pixel is sky
+ * \param connections Connection of every pixel, empty if the model has no surface output
  */
-void CameraImage::setPrediction(const std::vector<double> &distances, const std::vector<uint8_t> &sky)
+void CameraImage::setPrediction(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
+                                const std::vector<uint8_t> &connections)
 {
     m_predictedDistances = distances;
     m_predictedSky = sky;
+    m_predictedConnections = connections;
 }
 
 /*!
@@ -169,19 +204,24 @@ int CameraImage::createMeshes(GLint vertexAttribute, GLint textureCoordinateAttr
     for (size_t i=0;i<m_correctDistances.size();i++) {
         correctSky[i] = m_correctDistances[i] <= 0.0 || m_correctDistances[i] >= SKY_DISTANCE_MM ? 1 : 0;
     }
-    if (createMesh(m_correctDistances, correctSky, vertexAttribute, textureCoordinateAttribute, &m_correctMesh) != 0) {
+    if (createMesh(m_correctDistances, correctSky, m_correctConnections, vertexAttribute, textureCoordinateAttribute,
+                   &m_correctMesh) != 0) {
         return 1;
     }
-    return createMesh(m_predictedDistances, m_predictedSky, vertexAttribute, textureCoordinateAttribute, &m_predictedMesh);
+    return createMesh(m_predictedDistances, m_predictedSky, m_predictedConnections, vertexAttribute, textureCoordinateAttribute,
+                      &m_predictedMesh);
 }
 
 /*!
  * \brief CameraImage::createMesh
  * \param distances distance (mm) of every pixel
  * \param sky 1 if the pixel is sky, it is put far away
+ * \param connections Connection of every pixel: a triangle is made if its pixels are connected to each other,
+ * empty: a triangle is made if its distances have no jump. The sky is connected only to the sky (sky dome).
  * \return 0 on success
  */
-int CameraImage::createMesh(const std::vector<double> &distances, const std::vector<uint8_t> &sky, GLint vertexAttribute,
+int CameraImage::createMesh(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
+                            const std::vector<uint8_t> &connections, GLint vertexAttribute,
                             GLint textureCoordinateAttribute, Mesh *mesh)
 {
     const int width = m_image.cols;
@@ -206,21 +246,40 @@ int CameraImage::createMesh(const std::vector<double> &distances, const std::vec
         vertices.push_back((static_cast<float>(x) + 0.5f)/static_cast<float>(width));
         vertices.push_back((static_cast<float>(y) + 0.5f)/static_cast<float>(height));
     };
-    auto connected = [&](int x0, int y0, int x1, int y1, int x2, int y2) {
-        const double a = distance[static_cast<size_t>(y0)*width + x0];
-        const double b = distance[static_cast<size_t>(y1)*width + x1];
-        const double c = distance[static_cast<size_t>(y2)*width + x2];
+    const bool surfaces = !connections.empty();
+    auto connection = [&](int x, int y, uint8_t direction) {
+        return (connections[static_cast<size_t>(y)*width + x] & direction) != 0;
+    };
+    // surfaceConnected: the pixels of the triangle are connected to each other (only used with the connections)
+    auto connected = [&](int x0, int y0, int x1, int y1, int x2, int y2, bool surfaceConnected) {
+        const size_t i0 = static_cast<size_t>(y0)*width + x0;
+        const size_t i1 = static_cast<size_t>(y1)*width + x1;
+        const size_t i2 = static_cast<size_t>(y2)*width + x2;
+        if (surfaces) {
+            if (sky[i0] || sky[i1] || sky[i2]) {
+                return sky[i0] && sky[i1] && sky[i2];
+            }
+            return surfaceConnected;
+        }
+        const double a = distance[i0];
+        const double b = distance[i1];
+        const double c = distance[i2];
         return std::max(a, std::max(b, c)) <= DISTANCE_JUMP_RATIO*std::min(a, std::min(b, c));
     };
-    // two triangles between every 2x2 pixels
+    // two triangles between every 2x2 pixels: the top left pixel with its right and lower neighbour,
+    // and the bottom right pixel with its upper and left neighbour
     for (int y=0;y+1<height;y++) {
         for (int x=0;x+1<width;x++) {
-            if (connected(x, y, x + 1, y, x, y + 1)) {
+            const bool first = connected(x, y, x + 1, y, x, y + 1,
+                                         surfaces && connection(x, y, ConnectedRight) && connection(x, y, ConnectedDown));
+            const bool second = connected(x + 1, y, x + 1, y + 1, x, y + 1,
+                                          surfaces && connection(x + 1, y, ConnectedDown) && connection(x, y + 1, ConnectedRight));
+            if (first) {
                 addVertex(x, y);
                 addVertex(x + 1, y);
                 addVertex(x, y + 1);
             }
-            if (connected(x + 1, y, x + 1, y + 1, x, y + 1)) {
+            if (second) {
                 addVertex(x + 1, y);
                 addVertex(x + 1, y + 1);
                 addVertex(x, y + 1);

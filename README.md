@@ -24,6 +24,8 @@ Keys:
 - t changes between the distances predicted by the model and the correct distances of the .dat files
 
 Every pixel is put to the camera position + distance along its ray through the lens (lens distortion of the .dat
-file is used). Neighbouring pixels are joined to triangles, except over a jump of the distance (edges of the objects).
+file is used). Neighbouring pixels are joined to triangles, except over the edges of the surfaces: the correct
+edges are from the surface numbers of the .dat files and the predicted edges from the model, if it has the surface
+output (prj-camera-image-learner model file version 4). Without them a jump of the distance is an edge.
 Pixels that the model predicts as sky are put far away (sky dome), so the model must have the sky output
 (prj-camera-image-learner model file version 2). Black areas are places that no camera sees.

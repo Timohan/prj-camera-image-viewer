@@ -75,7 +75,7 @@ bool ViewerScene::load(const std::string &imageDirectory, const std::string &sce
         if (predictions[i].distances.empty()) {
             return false;
         }
-        m_listCameraImage[i]->setPrediction(predictions[i].distances, predictions[i].sky);
+        m_listCameraImage[i]->setPrediction(predictions[i].distances, predictions[i].sky, predictions[i].connections);
     }
     moveToCamera(0);
     return true;

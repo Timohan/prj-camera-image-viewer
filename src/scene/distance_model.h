@@ -10,7 +10,8 @@
 /*!
  * \brief DistanceModel
  * vision transformer of prj-camera-image-learner that predicts the distance of every pixel of an image and which pixels
- * are sky, the model must have the sky output
+ * are sky, the model must have the sky output. A model with the surface output also predicts which neighbouring pixels
+ * are on the same surface (the edges between the surfaces).
  */
 class DistanceModel
 {
@@ -18,10 +19,12 @@ public:
     DistanceModel();
 
     bool load(const std::string &filename);
-    // distances (mm) and sky (1) or not (0) of every pixel of an image
+    // distances (mm) and sky (1) or not (0) of every pixel of an image, connections of every pixel to its right and lower
+    // neighbour (CameraImage::ConnectedRight, ConnectedDown), empty if the model has no surface output
     struct Prediction {
         std::vector<double> distances;
         std::vector<uint8_t> sky;
+        std::vector<uint8_t> connections;
     };
 
     std::vector<Prediction> predict(const std::vector<const cv::Mat *> &images) const;
