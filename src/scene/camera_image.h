@@ -40,7 +40,7 @@ public:
                        const std::vector<uint8_t> &connections);
     int createMeshes(GLint vertexAttribute, GLint textureCoordinateAttribute);
     void render(bool correctDistances, bool fillMesh = false) const;
-    std::string getDistanceText(int x, int y, bool correctDistances) const;
+    std::string getDistanceText(int x, int y, bool correctDistances, const VECTOR3 &point) const;
 
     const cv::Mat &getImage() const;
     int getCameraNumber() const;

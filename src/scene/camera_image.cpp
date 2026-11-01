@@ -389,32 +389,33 @@ void CameraImage::render(bool correctDistances, bool fillMesh) const
 
 /*!
  * \brief CameraImage::getDistanceText
- * \param x, y pixel of the image
- * \param correctDistances true: correct distance of the data file, false: distance predicted by the model
- * \return distance from the camera in mm, "Sky", or "N/A" if the pixel sees nothing (correct distance 0)
+ * \param x, y pixel of the image nearest to the point
+ * \param correctDistances true: mesh of the correct distances of the data file, false: of the predicted distances
+ * \param point point on the mesh (opengl units), between the pixels of its triangle
+ * \return distance of the point from the camera in mm, "Sky" if the pixel is sky, or "N/A" if the pixel sees nothing
+ * (correct distance 0). Near the horizon one pixel can be tens of meters long, so the point is used instead of the
+ * distance of the pixel.
  */
-std::string CameraImage::getDistanceText(int x, int y, bool correctDistances) const
+std::string CameraImage::getDistanceText(int x, int y, bool correctDistances, const VECTOR3 &point) const
 {
     if (x < 0 || y < 0 || x >= m_image.cols || y >= m_image.rows) {
         return "N/A";
     }
     const size_t i = static_cast<size_t>(y)*m_image.cols + x;
-    double distance;
     if (correctDistances) {
-        distance = m_correctDistances[i];
-        if (distance <= 0.0) {
+        if (m_correctDistances[i] <= 0.0) {
             return "N/A";
         }
-        if (distance >= SKY_DISTANCE_MM) {
+        if (m_correctDistances[i] >= SKY_DISTANCE_MM) {
             return "Sky";
         }
-    } else {
-        if (m_predictedSky[i]) {
-            return "Sky";
-        }
-        distance = m_predictedDistances[i];
+    } else if (m_predictedSky[i]) {
+        return "Sky";
     }
-    return std::to_string(static_cast<long long>(std::llround(distance))) + " mm";
+    const double dx = point.x*MM_TO_OPENGL_UNIT - m_position[0];
+    const double dy = point.y*MM_TO_OPENGL_UNIT - m_position[1];
+    const double dz = point.z*MM_TO_OPENGL_UNIT - m_position[2];
+    return std::to_string(static_cast<long long>(std::llround(std::sqrt(dx*dx + dy*dy + dz*dz)))) + " mm";
 }
 
 const cv::Mat &CameraImage::getImage() const

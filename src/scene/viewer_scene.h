@@ -57,13 +57,16 @@ private:
     float m_pickX;              // window pixels from the top left corner
     float m_pickY;
     bool m_picked;              // a pick was done and takePicked() has not returned it yet
+    bool m_pickDone;            // at least one pick was done
     int m_pickedImage;          // index of the camera image at the picked point, -1: no image (black area)
     int m_pickedPixelX;         // pixel of the camera image at the picked point
     int m_pickedPixelY;
     int m_pickedWindowX;        // picked point, window pixels from the top left corner
     int m_pickedWindowY;
+    VECTOR3 m_pickedPoint;      // picked point on the mesh, opengl units
 
-    void renderPick(const Matrix4x4 &projection, const Matrix4x4 &view, float height);
+    void renderPick(const Matrix4x4 &projection, const Matrix4x4 &view, float width, float height);
+    static bool unproject(const Matrix4x4 &projection, const Matrix4x4 &view, double x, double y, double z, VECTOR3 *point);
 
     static std::string findScene(const std::string &imageDirectory);
 };

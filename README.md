@@ -25,9 +25,10 @@ Keys:
   .dat files are there), the label at the top left corner shows which ones are shown
 - f fills the black areas (places that no camera sees, behind the edges of the objects) with the background behind
   the edge, or shows them black, the label at the top left corner shows if it is on (default) or off
-- left click on a point shows the point (window pixels from the top left corner) and the distance of the camera image
-  pixel there from its camera (`Camera <number> <x>/<y> Distance from camera: <mm>`) with the shown distances, `Sky`
-  for the sky and `N/A` for a black area or a pixel that sees nothing
+- left click on a point shows the point (window pixels from the top left corner) and the distance of the clicked point
+  of the surface from the camera of the image there (`Camera <number> <x>/<y> Distance from camera: <mm>`) with the
+  shown distances, `Sky` for the sky and `N/A` for a black area or a pixel that sees nothing. The point is between the
+  pixels of its triangle, near the horizon one pixel can be tens of meters long.
 
 The camera positions and lenses are from the model (prj-camera-image-learner model file version 7, the training saves
 them), so only the png files are needed, the .dat files are read only for the correct distances if they are there.

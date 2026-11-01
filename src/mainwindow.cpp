@@ -39,10 +39,8 @@ MainWindow::MainWindow(int width, int height, std::unique_ptr<ViewerScene> viewe
     m_viewKeyListener.onToggleDistances = [this]() {
         m_viewerScene->toggleDistances();
         updateDistancesText();
-        // the picked pixel shows the distance of the new distances
-        if (m_pixelText.getText() != PIXEL_LABEL_START_TEXT) {
-            m_pixelText.setText(m_viewerScene->getPickedText().c_str());
-        }
+        // the picked point is picked again on the mesh of the new distances
+        requestRender();
     };
     m_viewKeyListener.onToggleFillGaps = [this]() {
         m_viewerScene->toggleFillGaps();

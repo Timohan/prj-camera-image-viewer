@@ -30,11 +30,13 @@ ViewerScene::ViewerScene() :
     m_pickX(0.0f),
     m_pickY(0.0f),
     m_picked(false),
+    m_pickDone(false),
     m_pickedImage(-1),
     m_pickedPixelX(0),
     m_pickedPixelY(0),
     m_pickedWindowX(0),
-    m_pickedWindowY(0)
+    m_pickedWindowY(0),
+    m_pickedPoint({ 0.0f, 0.0f, 0.0f })
 {
 }
 
@@ -162,7 +164,7 @@ void ViewerScene::render(float width, float height)
     glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
     if (m_pickPending) {
         // drawn to the back buffer before the real frame, it is cleared again before it is shown
-        renderPick(projection, view, height);
+        renderPick(projection, view, width, height);
     }
     glClearColor(BACKGROUND_COLOR);
     glClearStencil(0);
@@ -199,7 +201,7 @@ void ViewerScene::render(float width, float height)
  * draws the meshes with the pick program (camera image and pixel coded in the color, see ViewerShader)
  * and reads the color of the pick point
  */
-void ViewerScene::renderPick(const Matrix4x4 &projection, const Matrix4x4 &view, float height)
+void ViewerScene::renderPick(const Matrix4x4 &projection, const Matrix4x4 &view, float width, float height)
 {
     m_pickPending = false;
     m_pickedWindowX = static_cast<int>(m_pickX);
@@ -228,6 +230,10 @@ void ViewerScene::renderPick(const Matrix4x4 &projection, const Matrix4x4 &view,
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(m_pickedWindowX, static_cast<GLint>(height) - 1 - m_pickedWindowY, 1, 1,
                  GL_RGBA, GL_UNSIGNED_BYTE, color);
+    // depth of the point on the mesh, 0..1 from the near to the far plane
+    GLfloat depth = 1.0f;
+    glReadPixels(m_pickedWindowX, static_cast<GLint>(height) - 1 - m_pickedWindowY, 1, 1,
+                 GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glEnable(GL_MULTISAMPLE);
     if (blend) {
@@ -237,12 +243,81 @@ void ViewerScene::renderPick(const Matrix4x4 &projection, const Matrix4x4 &view,
     const long pixel = static_cast<long>(color[0]) + (static_cast<long>(color[1]) << 8) + (static_cast<long>(color[2]) << 16) - 1;
     m_pickedImage = -1;
     if (imageIndex >= 0 && imageIndex < static_cast<int>(m_listCameraImage.size()) && pixel >= 0) {
-        const int width = m_listCameraImage[static_cast<size_t>(imageIndex)]->getImage().cols;
+        const int imageWidth = m_listCameraImage[static_cast<size_t>(imageIndex)]->getImage().cols;
         m_pickedImage = imageIndex;
-        m_pickedPixelX = static_cast<int>(pixel % width);
-        m_pickedPixelY = static_cast<int>(pixel/width);
+        m_pickedPixelX = static_cast<int>(pixel % imageWidth);
+        m_pickedPixelY = static_cast<int>(pixel/imageWidth);
+        // window pixel center and depth to normalized device coordinates (-1..1), opengl y goes up
+        if (!unproject(projection, view, 2.0*(m_pickedWindowX + 0.5)/width - 1.0,
+                       1.0 - 2.0*(m_pickedWindowY + 0.5)/height, 2.0*depth - 1.0, &m_pickedPoint)) {
+            m_pickedImage = -1;
+        }
     }
     m_picked = true;
+    m_pickDone = true;
+}
+
+/*!
+ * \brief ViewerScene::unproject
+ * turns normalized device coordinates (x, y, z -1..1) back to the world with the inverse of projection*view
+ * (the shader does projection*(view*vertex) with column-major matrices)
+ * \return false if the matrix has no inverse or the point is at infinity
+ */
+bool ViewerScene::unproject(const Matrix4x4 &projection, const Matrix4x4 &view, double x, double y, double z, VECTOR3 *point)
+{
+    // m = projection*view, element (row r, column c) of a column-major matrix is m[c*4 + r]
+    double a[4][8];
+    for (int r=0;r<4;r++) {
+        for (int c=0;c<4;c++) {
+            double sum = 0.0;
+            for (int k=0;k<4;k++) {
+                sum += static_cast<double>(projection.m[k*4 + r])*static_cast<double>(view.m[c*4 + k]);
+            }
+            a[r][c] = sum;
+            a[r][4 + c] = r == c ? 1.0 : 0.0;
+        }
+    }
+    // Gauss-Jordan elimination with partial pivoting, the right half becomes the inverse
+    for (int c=0;c<4;c++) {
+        int pivot = c;
+        for (int r=c + 1;r<4;r++) {
+            if (std::fabs(a[r][c]) > std::fabs(a[pivot][c])) {
+                pivot = r;
+            }
+        }
+        if (std::fabs(a[pivot][c]) < 1e-12) {
+            return false;
+        }
+        for (int k=0;k<8;k++) {
+            std::swap(a[c][k], a[pivot][k]);
+        }
+        const double scale = 1.0/a[c][c];
+        for (int k=0;k<8;k++) {
+            a[c][k] *= scale;
+        }
+        for (int r=0;r<4;r++) {
+            if (r != c) {
+                const double factor = a[r][c];
+                for (int k=0;k<8;k++) {
+                    a[r][k] -= factor*a[c][k];
+                }
+            }
+        }
+    }
+    const double ndc[4] = { x, y, z, 1.0 };
+    double world[4];
+    for (int r=0;r<4;r++) {
+        world[r] = 0.0;
+        for (int c=0;c<4;c++) {
+            world[r] += a[r][4 + c]*ndc[c];
+        }
+    }
+    if (std::fabs(world[3]) < 1e-12) {
+        return false;
+    }
+    *point = { static_cast<float>(world[0]/world[3]), static_cast<float>(world[1]/world[3]),
+               static_cast<float>(world[2]/world[3]) };
+    return true;
 }
 
 /*!
@@ -271,8 +346,8 @@ bool ViewerScene::takePicked()
 /*!
  * \brief ViewerScene::getPickedText
  * \return "Camera <number> <x>/<y> Distance from camera: <distance>" of the picked point (window pixels) with the
- * shown distances, the distance is from the camera of the image at the point in mm, "Sky", or "N/A" (the pixel sees
- * nothing). A black area (no image) is "<x>/<y> Distance from camera: N/A".
+ * shown distances, the distance of the point on the mesh from the camera of the image in mm, "Sky", or "N/A" (the pixel
+ * sees nothing). A black area (no image) is "<x>/<y> Distance from camera: N/A".
  */
 std::string ViewerScene::getPickedText() const
 {
@@ -282,7 +357,7 @@ std::string ViewerScene::getPickedText() const
     }
     const CameraImage &image = *m_listCameraImage[static_cast<size_t>(m_pickedImage)];
     return "Camera " + std::to_string(image.getCameraNumber()) + " " + point + " Distance from camera: "
-        + image.getDistanceText(m_pickedPixelX, m_pickedPixelY, m_correctDistances);
+        + image.getDistanceText(m_pickedPixelX, m_pickedPixelY, m_correctDistances, m_pickedPoint);
 }
 
 /*!
@@ -325,6 +400,10 @@ void ViewerScene::toggleDistances()
     }
     m_correctDistances = !m_correctDistances;
     TG_DEBUG_LOG(m_correctDistances ? "Correct distances of the data files" : "Distances predicted by the model");
+    // the picked point is on the other mesh now, it is picked again in the next render
+    if (m_pickDone) {
+        pick(static_cast<float>(m_pickedWindowX), static_cast<float>(m_pickedWindowY));
+    }
 }
 
 /*!
