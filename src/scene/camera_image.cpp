@@ -41,6 +41,8 @@ CameraImage::~CameraImage()
 {
     deleteMesh(&m_correctMesh);
     deleteMesh(&m_predictedMesh);
+    deleteMesh(&m_correctFillMesh);
+    deleteMesh(&m_predictedFillMesh);
     if (m_texture) {
         glDeleteTextures(1, &m_texture);
     }
@@ -205,11 +207,11 @@ int CameraImage::createMeshes(GLint vertexAttribute, GLint textureCoordinateAttr
         correctSky[i] = m_correctDistances[i] <= 0.0 || m_correctDistances[i] >= SKY_DISTANCE_MM ? 1 : 0;
     }
     if (createMesh(m_correctDistances, correctSky, m_correctConnections, vertexAttribute, textureCoordinateAttribute,
-                   &m_correctMesh) != 0) {
+                   &m_correctMesh, &m_correctFillMesh) != 0) {
         return 1;
     }
     return createMesh(m_predictedDistances, m_predictedSky, m_predictedConnections, vertexAttribute, textureCoordinateAttribute,
-                      &m_predictedMesh);
+                      &m_predictedMesh, &m_predictedFillMesh);
 }
 
 /*!
@@ -218,11 +220,13 @@ int CameraImage::createMeshes(GLint vertexAttribute, GLint textureCoordinateAttr
  * \param sky 1 if the pixel is sky, it is put far away
  * \param connections Connection of every pixel: a triangle is made if its pixels are connected to each other,
  * empty: a triangle is made if its distances have no jump. The sky is connected only to the sky (sky dome).
+ * \param mesh returns the triangles of the connected pixels
+ * \param fillMesh returns the other triangles, every vertex has the color of the farthest pixel of the triangle
  * \return 0 on success
  */
 int CameraImage::createMesh(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
                             const std::vector<uint8_t> &connections, GLint vertexAttribute,
-                            GLint textureCoordinateAttribute, Mesh *mesh)
+                            GLint textureCoordinateAttribute, Mesh *mesh, Mesh *fillMesh)
 {
     const int width = m_image.cols;
     const int height = m_image.rows;
@@ -235,16 +239,37 @@ int CameraImage::createMesh(const std::vector<double> &distances, const std::vec
     for (size_t i=0;i<distances.size();i++) {
         distance[i] = sky[i] ? FAR_DISTANCE_MM : distances[i];
     }
-    std::vector<float> vertices;
-    auto addVertex = [&](int x, int y) {
+    std::vector<float> vertices, fillVertices;
+    // position of pixel x, y and the texture coordinates of the center of pixel textureX, textureY
+    auto addVertex = [&](std::vector<float> &list, int x, int y, int textureX, int textureY) {
         const size_t i = static_cast<size_t>(y)*width + x;
         const VECTOR3 &ray = m_rays[i];
-        vertices.push_back(static_cast<float>((m_position[0] + distance[i]*ray.x)/MM_TO_OPENGL_UNIT));
-        vertices.push_back(static_cast<float>((m_position[1] + distance[i]*ray.y)/MM_TO_OPENGL_UNIT));
-        vertices.push_back(static_cast<float>((m_position[2] + distance[i]*ray.z)/MM_TO_OPENGL_UNIT));
+        list.push_back(static_cast<float>((m_position[0] + distance[i]*ray.x)/MM_TO_OPENGL_UNIT));
+        list.push_back(static_cast<float>((m_position[1] + distance[i]*ray.y)/MM_TO_OPENGL_UNIT));
+        list.push_back(static_cast<float>((m_position[2] + distance[i]*ray.z)/MM_TO_OPENGL_UNIT));
         // texture coordinates of the pixel center
-        vertices.push_back((static_cast<float>(x) + 0.5f)/static_cast<float>(width));
-        vertices.push_back((static_cast<float>(y) + 0.5f)/static_cast<float>(height));
+        list.push_back((static_cast<float>(textureX) + 0.5f)/static_cast<float>(width));
+        list.push_back((static_cast<float>(textureY) + 0.5f)/static_cast<float>(height));
+    };
+    auto addTriangle = [&](bool isConnected, int x0, int y0, int x1, int y1, int x2, int y2) {
+        if (isConnected) {
+            addVertex(vertices, x0, y0, x0, y0);
+            addVertex(vertices, x1, y1, x1, y1);
+            addVertex(vertices, x2, y2, x2, y2);
+            return;
+        }
+        // the farthest pixel is the background behind the edge
+        const int xs[3] = { x0, x1, x2 };
+        const int ys[3] = { y0, y1, y2 };
+        int far = 0;
+        for (int k=1;k<3;k++) {
+            if (distance[static_cast<size_t>(ys[k])*width + xs[k]] > distance[static_cast<size_t>(ys[far])*width + xs[far]]) {
+                far = k;
+            }
+        }
+        for (int k=0;k<3;k++) {
+            addVertex(fillVertices, xs[k], ys[k], xs[far], ys[far]);
+        }
     };
     const bool surfaces = !connections.empty();
     auto connection = [&](int x, int y, uint8_t direction) {
@@ -274,18 +299,22 @@ int CameraImage::createMesh(const std::vector<double> &distances, const std::vec
                                          surfaces && connection(x, y, ConnectedRight) && connection(x, y, ConnectedDown));
             const bool second = connected(x + 1, y, x + 1, y + 1, x, y + 1,
                                           surfaces && connection(x + 1, y, ConnectedDown) && connection(x, y + 1, ConnectedRight));
-            if (first) {
-                addVertex(x, y);
-                addVertex(x + 1, y);
-                addVertex(x, y + 1);
-            }
-            if (second) {
-                addVertex(x + 1, y);
-                addVertex(x + 1, y + 1);
-                addVertex(x, y + 1);
-            }
+            addTriangle(first, x, y, x + 1, y, x, y + 1);
+            addTriangle(second, x + 1, y, x + 1, y + 1, x, y + 1);
         }
     }
+    uploadMesh(vertices, vertexAttribute, textureCoordinateAttribute, mesh);
+    uploadMesh(fillVertices, vertexAttribute, textureCoordinateAttribute, fillMesh);
+    return 0;
+}
+
+/*!
+ * \brief CameraImage::uploadMesh
+ * \param vertices VERTEX_VALUES values of every vertex, every 3 vertices are a triangle
+ */
+void CameraImage::uploadMesh(const std::vector<float> &vertices, GLint vertexAttribute, GLint textureCoordinateAttribute,
+                             Mesh *mesh)
+{
     mesh->vertexCount = static_cast<GLsizei>(vertices.size()/VERTEX_VALUES);
     glGenVertexArrays(1, &mesh->vertexArray);
     glGenBuffers(1, &mesh->vertexBuffer);
@@ -299,16 +328,17 @@ int CameraImage::createMesh(const std::vector<double> &distances, const std::vec
                           reinterpret_cast<void *>(3*sizeof(float)));
     glEnableVertexAttribArray(static_cast<GLuint>(textureCoordinateAttribute));
     glBindVertexArray(0);
-    return 0;
 }
 
 /*!
  * \brief CameraImage::render
  * \param correctDistances true: mesh of the correct distances, false: mesh of the predicted distances
+ * \param fillMesh true: the fill mesh (triangles over the edges)
  */
-void CameraImage::render(bool correctDistances) const
+void CameraImage::render(bool correctDistances, bool fillMesh) const
 {
-    const Mesh &mesh = correctDistances ? m_correctMesh : m_predictedMesh;
+    const Mesh &mesh = fillMesh ? (correctDistances ? m_correctFillMesh : m_predictedFillMesh)
+                                : (correctDistances ? m_correctMesh : m_predictedMesh);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_texture);
     glBindVertexArray(mesh.vertexArray);

@@ -16,6 +16,8 @@
  * the correct edges are from the surface numbers of the data file and the predicted edges from the model (surface output),
  * without them a jump of the distance is an edge. Sky (the correct sky of the data file, or the sky that the model
  * predicted) is put far away (sky dome). Positions are in opengl units (1000 mm = 1.0).
+ * The fill meshes have the triangles over the edges that the meshes do not have, colored by their farthest pixel
+ * (the background behind the edge), they fill the black areas that no camera sees (see ViewerScene::render()).
  */
 class CameraImage
 {
@@ -35,7 +37,7 @@ public:
     void setPrediction(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
                        const std::vector<uint8_t> &connections);
     int createMeshes(GLint vertexAttribute, GLint textureCoordinateAttribute);
-    void render(bool correctDistances) const;
+    void render(bool correctDistances, bool fillMesh = false) const;
     std::string getDistanceText(int x, int y, bool correctDistances) const;
 
     const cv::Mat &getImage() const;
@@ -62,11 +64,15 @@ private:
     GLuint m_texture;
     Mesh m_correctMesh;
     Mesh m_predictedMesh;
+    Mesh m_correctFillMesh;
+    Mesh m_predictedFillMesh;
 
     bool readData(const std::string &filename);
     int createMesh(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
                    const std::vector<uint8_t> &connections, GLint vertexAttribute,
-                   GLint textureCoordinateAttribute, Mesh *mesh);
+                   GLint textureCoordinateAttribute, Mesh *mesh, Mesh *fillMesh);
+    static void uploadMesh(const std::vector<float> &vertices, GLint vertexAttribute, GLint textureCoordinateAttribute,
+                           Mesh *mesh);
     static void deleteMesh(Mesh *mesh);
 };
 

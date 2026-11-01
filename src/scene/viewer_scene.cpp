@@ -19,6 +19,7 @@
 
 ViewerScene::ViewerScene() :
     m_correctDistances(false),
+    m_fillGaps(true),
     m_position({ 0.0f, 1.0f, 0.0f }),
     m_yaw(0.0f),
     m_pitch(0.0f),
@@ -148,15 +149,31 @@ void ViewerScene::render(float width, float height)
         renderPick(projection, view, height);
     }
     glClearColor(BACKGROUND_COLOR);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     glUseProgram(m_shader.program());
     glUniformMatrix4fv(glGetUniformLocation(m_shader.program(), "projection"), 1, GL_FALSE, projection.m);
     glUniformMatrix4fv(glGetUniformLocation(m_shader.program(), "view"), 1, GL_FALSE, view.m);
     glUniform1i(glGetUniformLocation(m_shader.program(), "texture"), 0);
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+    if (m_fillGaps) {
+        // the meshes mark their pixels in the stencil buffer
+        glEnable(GL_STENCIL_TEST);
+        glStencilFunc(GL_ALWAYS, 1, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+    }
     for (const auto &image : m_listCameraImage) {
         image->render(m_correctDistances);
+    }
+    if (m_fillGaps) {
+        // fill meshes only on the pixels that no mesh has drawn (black areas), so they never hide a real surface
+        glStencilFunc(GL_EQUAL, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        for (const auto &image : m_listCameraImage) {
+            image->render(m_correctDistances, true);
+        }
+        glDisable(GL_STENCIL_TEST);
     }
     glDisable(GL_DEPTH_TEST);
 }
@@ -288,6 +305,25 @@ void ViewerScene::toggleDistances()
 {
     m_correctDistances = !m_correctDistances;
     TG_DEBUG_LOG(m_correctDistances ? "Correct distances of the data files" : "Distances predicted by the model");
+}
+
+/*!
+ * \brief ViewerScene::toggleFillGaps
+ * changes between filled and black areas that no camera sees
+ */
+void ViewerScene::toggleFillGaps()
+{
+    m_fillGaps = !m_fillGaps;
+    TG_DEBUG_LOG(m_fillGaps ? "Black areas are filled" : "Black areas are not filled");
+}
+
+/*!
+ * \brief ViewerScene::getFillGaps
+ * \return true if the black areas are filled
+ */
+bool ViewerScene::getFillGaps() const
+{
+    return m_fillGaps;
 }
 
 /*!

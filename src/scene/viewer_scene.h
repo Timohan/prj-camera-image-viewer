@@ -15,6 +15,8 @@
  * move forward and backward and jump to the place of every camera.
  * Distances are the ones that the model predicted, or the correct ones of the data files for comparison.
  * A point of the window can be picked: the next render finds the camera image pixel that is shown there.
+ * Black areas (places that no camera sees, behind the edges of the objects) can be filled with the background
+ * behind the edge (fill meshes of CameraImage).
  */
 class ViewerScene
 {
@@ -30,6 +32,8 @@ public:
     void moveToCamera(int index);
     void toggleDistances();
     bool getCorrectDistances() const;
+    void toggleFillGaps();
+    bool getFillGaps() const;
     void startTurn(int direction);
     void stopTurn(int direction);
     void startPitch(int direction);
@@ -41,6 +45,7 @@ private:
     ViewerShader m_shader;
     std::vector<std::unique_ptr<CameraImage>> m_listCameraImage;
     bool m_correctDistances;    // true: correct distances, false: predicted distances
+    bool m_fillGaps;            // black areas are filled with the fill meshes
     VECTOR3 m_position;         // view camera, opengl units
     float m_yaw;                // radians, 0 looks to +z, positive turns to +x
     float m_pitch;              // radians, positive looks up

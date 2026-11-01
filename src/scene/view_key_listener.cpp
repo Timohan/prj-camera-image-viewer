@@ -38,6 +38,10 @@ TgEventResult ViewKeyListener::handleEvent(TgEventData *eventData, const TgWindo
             onToggleDistances();
             return TgEventResult::EventResultCompleted;
         }
+        if (key == 'f' && onToggleFillGaps) {
+            onToggleFillGaps();
+            return TgEventResult::EventResultCompleted;
+        }
     }
     return TgItem2d::handleEvent(eventData, windowInfo);
 }

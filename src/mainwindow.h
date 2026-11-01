@@ -31,8 +31,12 @@ private:
     // shows if the distances are predicted or correct, white text on a blue background
     TgRectangle m_distancesBackground;
     TgTextfield m_distancesText;
+    // shows if the black areas are filled
+    TgRectangle m_fillBackground;
+    TgTextfield m_fillText;
 
     void updateDistancesText();
+    void updateFillText();
 };
 
 #endif

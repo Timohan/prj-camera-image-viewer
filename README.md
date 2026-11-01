@@ -23,6 +23,8 @@ Keys:
 - 0 moves to the middle of the cameras, 1-6 to the place of the camera
 - t changes between the distances predicted by the model and the correct distances of the .dat files,
   the label at the top left corner shows which ones are shown
+- f fills the black areas (places that no camera sees, behind the edges of the objects) with the background behind
+  the edge, or shows them black, the label at the top left corner shows if it is on (default) or off
 - left click on a point shows the point (window pixels from the top left corner) and the distance of the camera image
   pixel there from its camera (`Camera <number> <x>/<y> Distance from camera: <mm>`) with the shown distances, `Sky`
   for the sky and `N/A` for a black area or a pixel that sees nothing
