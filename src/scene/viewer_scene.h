@@ -25,6 +25,7 @@ public:
     void render(float width, float height);
     void moveToCamera(int index);
     void toggleDistances();
+    bool getCorrectDistances() const;
     void startTurn(int direction);
     void stopTurn(int direction);
     void startPitch(int direction);

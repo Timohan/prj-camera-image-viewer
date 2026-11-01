@@ -3,6 +3,8 @@
 
 #include <memory>
 #include <window/tg_mainwindow.h>
+#include <item2d/tg_rectangle.h>
+#include <item2d/tg_textfield.h>
 #include "scene/viewer_scene.h"
 #include "scene/view_key_listener.h"
 
@@ -20,6 +22,11 @@ protected:
 private:
     std::unique_ptr<ViewerScene> m_viewerScene;
     ViewKeyListener m_viewKeyListener;
+    // shows if the distances are predicted or correct, white text on a blue background
+    TgRectangle m_distancesBackground;
+    TgTextfield m_distancesText;
+
+    void updateDistancesText();
 };
 
 #endif

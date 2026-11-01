@@ -186,6 +186,15 @@ void ViewerScene::toggleDistances()
     TG_DEBUG_LOG(m_correctDistances ? "Correct distances of the data files" : "Distances predicted by the model");
 }
 
+/*!
+ * \brief ViewerScene::getCorrectDistances
+ * \return true if the correct distances are shown, false if the predicted distances
+ */
+bool ViewerScene::getCorrectDistances() const
+{
+    return m_correctDistances;
+}
+
 void ViewerScene::startTurn(int direction)
 {
     update();
