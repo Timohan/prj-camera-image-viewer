@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -20,6 +21,7 @@
 #define DATA_CAMERA_INFO_MAGIC      "CAMI"
 #define DATA_CAMERA_INFO_VERSION    2
 #define DATA_CAMERA_INFO_VALUES     36
+static_assert(DATA_CAMERA_INFO_VALUES == VisionTransformer::CAMERA_VALUE_COUNT, "camera values of the model");
 // surface block after the camera information
 #define DATA_SURFACE_MAGIC          "SURF"
 #define DATA_SURFACE_VERSION        1
@@ -50,11 +52,12 @@ CameraImage::~CameraImage()
 
 /*!
  * \brief CameraImage::load
- * loads the png and data file and calculates the ray of every pixel
+ * loads the png file and the data file (if it is there) and calculates the ray of every pixel
  * \param filename full path of the png and data files without the extension
+ * \param camera camera and lens of the image from the model
  * \return true on success
  */
-bool CameraImage::load(const std::string &filename)
+bool CameraImage::load(const std::string &filename, const VisionTransformer::Camera &camera)
 {
     cv::Mat image = cv::imread(filename + ".png", cv::IMREAD_COLOR);
     if (image.empty()) {
@@ -62,18 +65,35 @@ bool CameraImage::load(const std::string &filename)
         return false;
     }
     cv::cvtColor(image, m_image, cv::COLOR_BGR2RGB);
+    if (static_cast<int>(camera.width) != m_image.cols || static_cast<int>(camera.height) != m_image.rows) {
+        TG_ERROR_LOG(filename + ".png", "is not of the size of camera", camera.number, "of the model");
+        return false;
+    }
+    setCamera(camera);
+    // the correct distances are only for comparison
+    std::error_code error;
+    if (!std::filesystem::exists(filename + ".dat", error)) {
+        return true;
+    }
     return readData(filename + ".dat");
 }
 
 /*!
+ * \brief CameraImage::hasCorrectDistances
+ * \return true if the data file had the correct distances
+ */
+bool CameraImage::hasCorrectDistances() const
+{
+    return !m_correctDistances.empty();
+}
+
+/*!
  * \brief CameraImage::readData
- * reads the correct distances and the camera and lens information of the data file of prj-camera-image-creator:
- * uint32_t width, height, double distance (mm) of every pixel, char[4] "CAMI", uint32_t version, camera number,
- * distortion model (0 pinhole, 1 fisheye) and 36 doubles: position (mm), direction, up vector, roll, focal length,
- * sensor width/height, resolution width/height, fx, fy, cx, cy, k1-k6, p1-p2, fisheye k1-k4, field of view,
- * aperture, focus distance, yaw, pitch. Then optionally char[4] "SURF", uint32_t version, uint32_t surface number of every
- * pixel and the normals: neighbouring pixels of the same surface number are connected (0 is the sky).
- * Then calculates the ray of every pixel through the lens.
+ * reads the correct distances of the data file of prj-camera-image-creator: uint32_t width, height, double distance (mm)
+ * of every pixel, char[4] "CAMI", uint32_t version, camera number, distortion model and 36 doubles (the camera and
+ * lens are from the model, only the camera number is checked), then optionally char[4] "SURF", uint32_t version,
+ * uint32_t surface number of every pixel and the normals: neighbouring pixels of the same surface number are connected
+ * (0 is the sky).
  * \return true on success
  */
 bool CameraImage::readData(const std::string &filename)
@@ -91,17 +111,19 @@ bool CameraImage::readData(const std::string &filename)
               static_cast<std::streamsize>(m_correctDistances.size()*sizeof(double)));
     char magic[4];
     uint32_t version, cameraNumber, distortionModel;
-    double values[DATA_CAMERA_INFO_VALUES];
     file.read(magic, sizeof(magic));
     file.read(reinterpret_cast<char *>(&version), sizeof(version));
     file.read(reinterpret_cast<char *>(&cameraNumber), sizeof(cameraNumber));
     file.read(reinterpret_cast<char *>(&distortionModel), sizeof(distortionModel));
-    file.read(reinterpret_cast<char *>(values), sizeof(values));
+    file.seekg(static_cast<std::streamoff>(DATA_CAMERA_INFO_VALUES*sizeof(double)), std::ios::cur);
     if (!file || memcmp(magic, DATA_CAMERA_INFO_MAGIC, sizeof(magic)) != 0 || version != DATA_CAMERA_INFO_VERSION) {
         TG_ERROR_LOG(filename, "has no camera information of version", DATA_CAMERA_INFO_VERSION);
         return false;
     }
-    m_cameraNumber = static_cast<int>(cameraNumber);
+    if (static_cast<int>(cameraNumber) != m_cameraNumber) {
+        TG_ERROR_LOG(filename, "is camera", cameraNumber, "but the model camera is", m_cameraNumber);
+        return false;
+    }
     // older data files have no surfaces
     m_correctConnections.clear();
     uint32_t surfaceVersion = 0;
@@ -128,6 +150,22 @@ bool CameraImage::readData(const std::string &filename)
             }
         }
     }
+    return true;
+}
+
+/*!
+ * \brief CameraImage::setCamera
+ * calculates the ray of every pixel through the lens
+ * \param camera camera of the model: position, direction, up, ..., fx, fy, cx, cy (15-18), k1-k6 (19-24), p1, p2 (25, 26),
+ * fisheye k1-k4 (27-30) like the camera information of the data file
+ */
+void CameraImage::setCamera(const VisionTransformer::Camera &camera)
+{
+    const uint32_t distortionModel = camera.distortionModel;
+    const double *values = camera.values;
+    const uint32_t width = static_cast<uint32_t>(m_image.cols);
+    const uint32_t height = static_cast<uint32_t>(m_image.rows);
+    m_cameraNumber = static_cast<int>(camera.number);
     for (int i=0;i<3;i++) {
         m_position[i] = values[i];
         m_direction[i] = values[3 + i];
@@ -165,7 +203,6 @@ bool CameraImage::readData(const std::string &filename)
         m_rays[i] = Math3D::Vec3Normalize({ forward.x + nx*right.x - ny*up.x, forward.y + nx*right.y - ny*up.y,
                                             forward.z + nx*right.z - ny*up.z });
     }
-    return true;
 }
 
 /*!
@@ -201,14 +238,17 @@ int CameraImage::createMeshes(GLint vertexAttribute, GLint textureCoordinateAttr
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
-    // sky of the data file is very far or 0 (pixel sees nothing)
-    std::vector<uint8_t> correctSky(m_correctDistances.size());
-    for (size_t i=0;i<m_correctDistances.size();i++) {
-        correctSky[i] = m_correctDistances[i] <= 0.0 || m_correctDistances[i] >= SKY_DISTANCE_MM ? 1 : 0;
-    }
-    if (createMesh(m_correctDistances, correctSky, m_correctConnections, vertexAttribute, textureCoordinateAttribute,
-                   &m_correctMesh, &m_correctFillMesh) != 0) {
-        return 1;
+    // without the data file only the predicted distances are known
+    if (hasCorrectDistances()) {
+        // sky of the data file is very far or 0 (pixel sees nothing)
+        std::vector<uint8_t> correctSky(m_correctDistances.size());
+        for (size_t i=0;i<m_correctDistances.size();i++) {
+            correctSky[i] = m_correctDistances[i] <= 0.0 || m_correctDistances[i] >= SKY_DISTANCE_MM ? 1 : 0;
+        }
+        if (createMesh(m_correctDistances, correctSky, m_correctConnections, vertexAttribute, textureCoordinateAttribute,
+                       &m_correctMesh, &m_correctFillMesh) != 0) {
+            return 1;
+        }
     }
     return createMesh(m_predictedDistances, m_predictedSky, m_predictedConnections, vertexAttribute, textureCoordinateAttribute,
                       &m_predictedMesh, &m_predictedFillMesh);

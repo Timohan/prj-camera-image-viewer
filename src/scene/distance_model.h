@@ -19,6 +19,7 @@ public:
     DistanceModel();
 
     bool load(const std::string &filename);
+    const std::vector<VisionTransformer::Camera> &getCameras() const;
     // distances (mm) and sky (1) or not (0) of every pixel of an image, connections of every pixel to its right and lower
     // neighbour (CameraImage::ConnectedRight, ConnectedDown), empty if the model has no surface output
     struct Prediction {

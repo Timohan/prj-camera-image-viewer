@@ -40,6 +40,15 @@ bool DistanceModel::load(const std::string &filename)
 }
 
 /*!
+ * \brief DistanceModel::getCameras
+ * \return cameras and lenses of the training images, empty if the model file has not them
+ */
+const std::vector<VisionTransformer::Camera> &DistanceModel::getCameras() const
+{
+    return m_network->getCameras();
+}
+
+/*!
  * \brief DistanceModel::predict
  * predicts the distances of the images, every image in its own thread
  * \param images RGB images, they must fit into the image size of the model

@@ -6,11 +6,12 @@
 #include <GL/glew.h>
 #include <opencv2/core.hpp>
 #include "math/math3d.h"
+#include "network/vision_transformer.h"
 
 /*!
  * \brief CameraImage
- * One camera image of prj-camera-image-creator: colors from the png file, camera and lens information and
- * correct distances from the data file, predicted distances from the model. The pixels are turned to 3D points
+ * One camera image of prj-camera-image-creator: colors from the png file, camera and lens information from the model,
+ * correct distances from the data file if it is there (only for comparison), predicted distances from the model. The pixels are turned to 3D points
  * (camera position + distance along the ray of the pixel through the lens) and neighbouring points are joined
  * to textured triangles, so the image becomes a 3D surface. Triangles are not made over the edges of the surfaces:
  * the correct edges are from the surface numbers of the data file and the predicted edges from the model (surface output),
@@ -33,7 +34,8 @@ public:
     CameraImage(const CameraImage &) = delete;
     CameraImage &operator=(const CameraImage &) = delete;
 
-    bool load(const std::string &filename);
+    bool load(const std::string &filename, const VisionTransformer::Camera &camera);
+    bool hasCorrectDistances() const;
     void setPrediction(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
                        const std::vector<uint8_t> &connections);
     int createMeshes(GLint vertexAttribute, GLint textureCoordinateAttribute);
@@ -68,6 +70,7 @@ private:
     Mesh m_predictedFillMesh;
 
     bool readData(const std::string &filename);
+    void setCamera(const VisionTransformer::Camera &camera);
     int createMesh(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
                    const std::vector<uint8_t> &connections, GLint vertexAttribute,
                    GLint textureCoordinateAttribute, Mesh *mesh, Mesh *fillMesh);

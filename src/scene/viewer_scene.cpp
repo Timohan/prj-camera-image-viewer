@@ -40,7 +40,8 @@ ViewerScene::ViewerScene() :
 
 /*!
  * \brief ViewerScene::load
- * loads the images <scene>_1, <scene>_2, ... and predicts their distances with the model
+ * loads the images <scene>_1, <scene>_2, ... and predicts their distances with the model. Cameras and lenses are from
+ * the model, the data files are read only for the correct distances if they are there.
  * \param imageDirectory output directory of prj-camera-image-creator
  * \param scene name of the scene, empty selects the scene with the largest number
  * \param modelFile model of prj-camera-image-learner
@@ -53,13 +54,32 @@ bool ViewerScene::load(const std::string &imageDirectory, const std::string &sce
         TG_ERROR_LOG("No scenes in", imageDirectory);
         return false;
     }
+    DistanceModel model;
+    if (!model.load(modelFile)) {
+        return false;
+    }
+    const std::vector<VisionTransformer::Camera> &cameras = model.getCameras();
+    if (cameras.empty()) {
+        TG_ERROR_LOG(modelFile, "has no cameras, train a new model with prj-camera-image-learner");
+        return false;
+    }
     for (int camera=1;;camera++) {
         const std::string filename = (std::filesystem::path(imageDirectory)/(name + "_" + std::to_string(camera))).string();
         if (!std::filesystem::exists(filename + ".png")) {
             break;
         }
+        const VisionTransformer::Camera *modelCamera = nullptr;
+        for (const VisionTransformer::Camera &candidate : cameras) {
+            if (static_cast<int>(candidate.number) == camera) {
+                modelCamera = &candidate;
+            }
+        }
+        if (!modelCamera) {
+            TG_ERROR_LOG(modelFile, "has no camera", camera);
+            return false;
+        }
         std::unique_ptr<CameraImage> image = std::make_unique<CameraImage>();
-        if (!image->load(filename)) {
+        if (!image->load(filename, *modelCamera)) {
             return false;
         }
         m_listCameraImage.push_back(std::move(image));
@@ -68,12 +88,8 @@ bool ViewerScene::load(const std::string &imageDirectory, const std::string &sce
         TG_ERROR_LOG("No images", (std::filesystem::path(imageDirectory)/(name + "_1.png")).string());
         return false;
     }
-    TG_DEBUG_LOG("Scene", name + ":", m_listCameraImage.size(), "cameras");
-
-    DistanceModel model;
-    if (!model.load(modelFile)) {
-        return false;
-    }
+    TG_DEBUG_LOG("Scene", name + ":", m_listCameraImage.size(), "cameras,",
+                 hasCorrectDistances() ? "correct distances from the data files" : "no data files (no correct distances)");
     std::vector<const cv::Mat *> images;
     for (const auto &image : m_listCameraImage) {
         images.push_back(&image->getImage());
@@ -303,6 +319,10 @@ void ViewerScene::moveToCamera(int index)
  */
 void ViewerScene::toggleDistances()
 {
+    if (!hasCorrectDistances()) {
+        TG_DEBUG_LOG("No data files, the correct distances are not known");
+        return;
+    }
     m_correctDistances = !m_correctDistances;
     TG_DEBUG_LOG(m_correctDistances ? "Correct distances of the data files" : "Distances predicted by the model");
 }
@@ -324,6 +344,20 @@ void ViewerScene::toggleFillGaps()
 bool ViewerScene::getFillGaps() const
 {
     return m_fillGaps;
+}
+
+/*!
+ * \brief ViewerScene::hasCorrectDistances
+ * \return true if every image has the correct distances of its data file
+ */
+bool ViewerScene::hasCorrectDistances() const
+{
+    for (const auto &image : m_listCameraImage) {
+        if (!image->hasCorrectDistances()) {
+            return false;
+        }
+    }
+    return !m_listCameraImage.empty();
 }
 
 /*!

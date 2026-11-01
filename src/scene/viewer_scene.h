@@ -32,6 +32,7 @@ public:
     void moveToCamera(int index);
     void toggleDistances();
     bool getCorrectDistances() const;
+    bool hasCorrectDistances() const;
     void toggleFillGaps();
     bool getFillGaps() const;
     void startTurn(int direction);
