@@ -1,19 +1,28 @@
 #include "mainwindow.h"
 
-// label of the shown distances at the top left corner
-#define DISTANCES_LABEL_MARGIN      10
+// labels at the top left corner: the picked pixel, then the shown distances
+#define LABEL_MARGIN                10
+#define LABEL_HEIGHT                36
+#define LABEL_FONT_SIZE             20
+#define PIXEL_LABEL_WIDTH           500
 #define DISTANCES_LABEL_WIDTH       260
-#define DISTANCES_LABEL_HEIGHT      36
-#define DISTANCES_LABEL_FONT_SIZE   20
+#define LABEL_BACKGROUND_COLOR      30, 80, 200, 255
+#define LABEL_TEXT_COLOR            255, 255, 255
+#define PIXEL_LABEL_START_TEXT      "Click a pixel"
 
 MainWindow::MainWindow(int width, int height, std::unique_ptr<ViewerScene> viewerScene)
     : TgMainWindow(width, height, "prj-camera-image-viewer"),
     m_viewerScene(std::move(viewerScene)),
     m_viewKeyListener(this),
-    m_distancesBackground(this, DISTANCES_LABEL_MARGIN, DISTANCES_LABEL_MARGIN, DISTANCES_LABEL_WIDTH,
-                          DISTANCES_LABEL_HEIGHT, 30, 80, 200, 255),
-    m_distancesText(&m_distancesBackground, "", "", DISTANCES_LABEL_FONT_SIZE, 255, 255, 255)
+    m_mouseCapture(this),
+    m_pixelBackground(this, LABEL_MARGIN, LABEL_MARGIN, PIXEL_LABEL_WIDTH, LABEL_HEIGHT, LABEL_BACKGROUND_COLOR),
+    m_pixelText(&m_pixelBackground, PIXEL_LABEL_START_TEXT, "", LABEL_FONT_SIZE, LABEL_TEXT_COLOR),
+    m_distancesBackground(this, 2*LABEL_MARGIN + PIXEL_LABEL_WIDTH, LABEL_MARGIN, DISTANCES_LABEL_WIDTH, LABEL_HEIGHT,
+                          LABEL_BACKGROUND_COLOR),
+    m_distancesText(&m_distancesBackground, "", "", LABEL_FONT_SIZE, LABEL_TEXT_COLOR)
 {
+    m_pixelText.setHorizontalAlign(TgTextfieldHorizontalAlign::AlignCenterH);
+    m_pixelText.setVerticalAlign(TgTextfieldVerticalAlign::AlignCenterV);
     m_distancesText.setHorizontalAlign(TgTextfieldHorizontalAlign::AlignCenterH);
     m_distancesText.setVerticalAlign(TgTextfieldVerticalAlign::AlignCenterV);
     updateDistancesText();
@@ -23,6 +32,10 @@ MainWindow::MainWindow(int width, int height, std::unique_ptr<ViewerScene> viewe
     m_viewKeyListener.onToggleDistances = [this]() {
         m_viewerScene->toggleDistances();
         updateDistancesText();
+        // the picked pixel shows the distance of the new distances
+        if (m_pixelText.getText() != PIXEL_LABEL_START_TEXT) {
+            m_pixelText.setText(m_viewerScene->getPickedText().c_str());
+        }
     };
     m_viewKeyListener.onTurnStart = [this](int direction) {
         m_viewerScene->startTurn(direction);
@@ -36,9 +49,18 @@ MainWindow::MainWindow(int width, int height, std::unique_ptr<ViewerScene> viewe
     m_viewKeyListener.onPitchStop = [this](int direction) {
         m_viewerScene->stopPitch(direction);
     };
-    m_viewKeyListener.onMove = [this](float steps) {
-        m_viewerScene->move(steps);
-    };
+    m_mouseCapture.connectOnMouseClicked([this](TgMouseType button, float x, float y, const void *) {
+        if (button == TgMouseType::ButtonLeft) {
+            m_viewerScene->pick(x, y);
+            requestRender();
+        }
+    });
+    m_mouseCapture.connectOnMouseScrollMove([this](double, double y) {
+        // wheel forward is positive, many wheel steps can be summed into one event
+        if (y != 0.0) {
+            m_viewerScene->move(static_cast<float>(y));
+        }
+    });
 }
 
 int MainWindow::initCustomShader()
@@ -57,6 +79,10 @@ void MainWindow::customBeforeRender()
 void MainWindow::customRender()
 {
     m_viewerScene->render(getWidth(), getHeight());
+    if (m_viewerScene->takePicked()) {
+        m_pixelText.setText(m_viewerScene->getPickedText().c_str());
+        requestRender();
+    }
 }
 
 void MainWindow::updateDistancesText()

@@ -36,6 +36,7 @@ public:
                        const std::vector<uint8_t> &connections);
     int createMeshes(GLint vertexAttribute, GLint textureCoordinateAttribute);
     void render(bool correctDistances) const;
+    std::string getDistanceText(int x, int y, bool correctDistances) const;
 
     const cv::Mat &getImage() const;
     int getCameraNumber() const;

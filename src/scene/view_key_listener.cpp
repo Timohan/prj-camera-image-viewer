@@ -7,13 +7,6 @@ ViewKeyListener::ViewKeyListener(TgItem2d *parent) :
 
 TgEventResult ViewKeyListener::handleEvent(TgEventData *eventData, const TgWindowInfo *windowInfo)
 {
-    if (eventData->m_type == TgEventType::EventTypeMouseScrollMove) {
-        // wheel forward is positive, many wheel steps can be summed into one event
-        if (onMove && eventData->m_event.m_mouseEvent.m_scroll_move_y != 0.0) {
-            onMove(static_cast<float>(eventData->m_event.m_mouseEvent.m_scroll_move_y));
-        }
-        return TgEventResult::EventResultCompleted;
-    }
     if (eventData->m_type == TgEventType::EventTypeKeyPress || eventData->m_type == TgEventType::EventTypeKeyRelease) {
         const bool press = eventData->m_type == TgEventType::EventTypeKeyPress;
         const TgPressReleaseKey key = eventData->m_event.m_keyEvent.m_pressReleaseKey;

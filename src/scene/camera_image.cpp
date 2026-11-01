@@ -317,6 +317,36 @@ void CameraImage::render(bool correctDistances) const
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
+/*!
+ * \brief CameraImage::getDistanceText
+ * \param x, y pixel of the image
+ * \param correctDistances true: correct distance of the data file, false: distance predicted by the model
+ * \return distance from the camera in mm, "Sky", or "N/A" if the pixel sees nothing (correct distance 0)
+ */
+std::string CameraImage::getDistanceText(int x, int y, bool correctDistances) const
+{
+    if (x < 0 || y < 0 || x >= m_image.cols || y >= m_image.rows) {
+        return "N/A";
+    }
+    const size_t i = static_cast<size_t>(y)*m_image.cols + x;
+    double distance;
+    if (correctDistances) {
+        distance = m_correctDistances[i];
+        if (distance <= 0.0) {
+            return "N/A";
+        }
+        if (distance >= SKY_DISTANCE_MM) {
+            return "Sky";
+        }
+    } else {
+        if (m_predictedSky[i]) {
+            return "Sky";
+        }
+        distance = m_predictedDistances[i];
+    }
+    return std::to_string(static_cast<long long>(std::llround(distance))) + " mm";
+}
+
 const cv::Mat &CameraImage::getImage() const
 {
     return m_image;

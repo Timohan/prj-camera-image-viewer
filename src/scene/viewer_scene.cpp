@@ -24,7 +24,16 @@ ViewerScene::ViewerScene() :
     m_pitch(0.0f),
     m_yawDirection(0),
     m_pitchDirection(0),
-    m_lastUpdate(std::chrono::steady_clock::now())
+    m_lastUpdate(std::chrono::steady_clock::now()),
+    m_pickPending(false),
+    m_pickX(0.0f),
+    m_pickY(0.0f),
+    m_picked(false),
+    m_pickedImage(-1),
+    m_pickedPixelX(0),
+    m_pickedPixelY(0),
+    m_pickedWindowX(0),
+    m_pickedWindowY(0)
 {
 }
 
@@ -134,6 +143,10 @@ void ViewerScene::render(float width, float height)
     Math3D::MatrixLookAtLH(&view, m_position, at, { 0.0f, 1.0f, 0.0f });
 
     glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    if (m_pickPending) {
+        // drawn to the back buffer before the real frame, it is cleared again before it is shown
+        renderPick(projection, view, height);
+    }
     glClearColor(BACKGROUND_COLOR);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glUseProgram(m_shader.program());
@@ -146,6 +159,97 @@ void ViewerScene::render(float width, float height)
         image->render(m_correctDistances);
     }
     glDisable(GL_DEPTH_TEST);
+}
+
+/*!
+ * \brief ViewerScene::renderPick
+ * draws the meshes with the pick program (camera image and pixel coded in the color, see ViewerShader)
+ * and reads the color of the pick point
+ */
+void ViewerScene::renderPick(const Matrix4x4 &projection, const Matrix4x4 &view, float height)
+{
+    m_pickPending = false;
+    m_pickedWindowX = static_cast<int>(m_pickX);
+    m_pickedWindowY = static_cast<int>(m_pickY);
+    const GLuint program = m_shader.pickProgram();
+    // blending would mix the coded colors, multisampling would average them at the edges of the triangles
+    const GLboolean blend = glIsEnabled(GL_BLEND);
+    glDisable(GL_BLEND);
+    glDisable(GL_MULTISAMPLE);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(program);
+    glUniformMatrix4fv(glGetUniformLocation(program, "projection"), 1, GL_FALSE, projection.m);
+    glUniformMatrix4fv(glGetUniformLocation(program, "view"), 1, GL_FALSE, view.m);
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    for (size_t i=0;i<m_listCameraImage.size();i++) {
+        const cv::Mat &image = m_listCameraImage[i]->getImage();
+        glUniform2f(glGetUniformLocation(program, "imageSize"), static_cast<float>(image.cols), static_cast<float>(image.rows));
+        glUniform1f(glGetUniformLocation(program, "imageIndex"), static_cast<float>(i));
+        m_listCameraImage[i]->render(m_correctDistances);
+    }
+    glDisable(GL_DEPTH_TEST);
+    // opengl rows start from the bottom
+    unsigned char color[4] = { 0, 0, 0, 0 };
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(m_pickedWindowX, static_cast<GLint>(height) - 1 - m_pickedWindowY, 1, 1,
+                 GL_RGBA, GL_UNSIGNED_BYTE, color);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glEnable(GL_MULTISAMPLE);
+    if (blend) {
+        glEnable(GL_BLEND);
+    }
+    const int imageIndex = static_cast<int>(color[3]) - 1;
+    const long pixel = static_cast<long>(color[0]) + (static_cast<long>(color[1]) << 8) + (static_cast<long>(color[2]) << 16) - 1;
+    m_pickedImage = -1;
+    if (imageIndex >= 0 && imageIndex < static_cast<int>(m_listCameraImage.size()) && pixel >= 0) {
+        const int width = m_listCameraImage[static_cast<size_t>(imageIndex)]->getImage().cols;
+        m_pickedImage = imageIndex;
+        m_pickedPixelX = static_cast<int>(pixel % width);
+        m_pickedPixelY = static_cast<int>(pixel/width);
+    }
+    m_picked = true;
+}
+
+/*!
+ * \brief ViewerScene::pick
+ * the next render() finds the camera image pixel that is shown at the point
+ * \param x, y window pixels from the top left corner
+ */
+void ViewerScene::pick(float x, float y)
+{
+    m_pickPending = true;
+    m_pickX = x;
+    m_pickY = y;
+}
+
+/*!
+ * \brief ViewerScene::takePicked
+ * \return true once after every pick that render() has done
+ */
+bool ViewerScene::takePicked()
+{
+    const bool picked = m_picked;
+    m_picked = false;
+    return picked;
+}
+
+/*!
+ * \brief ViewerScene::getPickedText
+ * \return "Camera <number> <x>/<y> Distance from camera: <distance>" of the picked point (window pixels) with the
+ * shown distances, the distance is from the camera of the image at the point in mm, "Sky", or "N/A" (the pixel sees
+ * nothing). A black area (no image) is "<x>/<y> Distance from camera: N/A".
+ */
+std::string ViewerScene::getPickedText() const
+{
+    const std::string point = std::to_string(m_pickedWindowX) + "/" + std::to_string(m_pickedWindowY);
+    if (m_pickedImage < 0) {
+        return point + " Distance from camera: N/A";
+    }
+    const CameraImage &image = *m_listCameraImage[static_cast<size_t>(m_pickedImage)];
+    return "Camera " + std::to_string(image.getCameraNumber()) + " " + point + " Distance from camera: "
+        + image.getDistanceText(m_pickedPixelX, m_pickedPixelY, m_correctDistances);
 }
 
 /*!

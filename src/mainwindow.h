@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <window/tg_mainwindow.h>
+#include <item2d/tg_mouse_capture.h>
 #include <item2d/tg_rectangle.h>
 #include <item2d/tg_textfield.h>
 #include "scene/viewer_scene.h"
@@ -22,6 +23,11 @@ protected:
 private:
     std::unique_ptr<ViewerScene> m_viewerScene;
     ViewKeyListener m_viewKeyListener;
+    // mouse on the whole window: left click picks a pixel, wheel moves forward or backward
+    TgMouseCapture m_mouseCapture;
+    // picked pixel and its distance from its camera, white text on a blue background
+    TgRectangle m_pixelBackground;
+    TgTextfield m_pixelText;
     // shows if the distances are predicted or correct, white text on a blue background
     TgRectangle m_distancesBackground;
     TgTextfield m_distancesText;
