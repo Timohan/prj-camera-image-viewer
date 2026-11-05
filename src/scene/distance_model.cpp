@@ -73,8 +73,9 @@ std::vector<DistanceModel::Prediction> DistanceModel::predict(const std::vector<
             const cv::Vec3b *row = image.ptr<cv::Vec3b>(y);
             for (int x=0;x<image.cols;x++) {
                 float *pixel = input.data() + (static_cast<size_t>(y)*config.width + x)*3;
+                // OpenCV image is BGR, the model is trained with RGB (ImageSamples::getInput of the learner)
                 for (int c=0;c<3;c++) {
-                    pixel[c] = static_cast<float>(row[x][c])/255.0f - COLOR_OFFSET;
+                    pixel[c] = static_cast<float>(row[x][2 - c])/255.0f - COLOR_OFFSET;
                 }
             }
         }
