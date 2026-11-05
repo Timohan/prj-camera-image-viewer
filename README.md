@@ -24,7 +24,7 @@ Keys:
 - t changes between the distances predicted by the model and the correct distances of the .dat files (only if the
   .dat files are there), the label at the top left corner shows which ones are shown
 - f fills the black areas (places that no camera sees, behind the edges of the objects) with the background behind
-  the edge, or shows them black, the label at the top left corner shows if it is on (default) or off
+  the edge, or shows them black, the label at the top left corner shows if it is on or off (default)
 - left click on a point shows the point (window pixels from the top left corner) and the distance of the clicked point
   of the surface from the camera of the image there (`Camera <number> <x>/<y> Distance from camera: <mm>`) with the
   shown distances, `Sky` for the sky and `N/A` for a black area or a pixel that sees nothing. The point is between the

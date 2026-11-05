@@ -19,7 +19,7 @@
 
 ViewerScene::ViewerScene() :
     m_correctDistances(false),
-    m_fillGaps(true),
+    m_fillGaps(false),
     m_position({ 0.0f, 1.0f, 0.0f }),
     m_yaw(0.0f),
     m_pitch(0.0f),
