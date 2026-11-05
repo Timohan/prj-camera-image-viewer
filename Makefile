@@ -8,12 +8,18 @@
 #*/
 TARGET:=prj-camera-image-viewer
 CXX:=$(if $(CXX),$(CXX),g++)
-# the vision transformer of the learner is compiled from its sources, so the viewer reads the same model files
+# src/network and src/global_log.h are copies of the sources of prj-camera-image-learner, so the viewer reads the same
+# model files and it can be compiled without the learner, `make update-learner` copies them again from LEARNER_PATH
 LEARNER_PATH?=$(CURRENT_DIR)../prj-camera-image-learner
+LEARNER_FILES:=network/vision_transformer.h network/vision_transformer.cpp network/pixel_label.h global_log.h
 PKGFLAGS=`pkg-config --cflags --libs prj-tg-ui-lib opencv4`
 CXXFLAGS+=-g -O2 -Wall -pedantic -c -pipe -std=gnu++17 -W -D_REENTRANT -fPIC
-CXXFLAGS+=-I./src -I$(LEARNER_PATH)/src
+CXXFLAGS+=-I./src
 CXXFLAGS+=$(PKGFLAGS)
+# model of this repository, it is used if no model is found from <cameraImageOutputDirectory>/camera_model
+CXXFLAGS+=-DDEFAULT_MODEL_FILE=\"$(CURRENT_DIR)model/default.model\"
+# configs/general.ini of this repository
+CXXFLAGS+=-DCONFIGS_PATH=\"$(CURRENT_DIR)configs/\"
 LDFLAGS:=$(PKGFLAGS) -lGL -lGLEW -lglfw -lpthread
 # set current make dir
 CURRENT_DIR=$(dir $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -34,12 +40,14 @@ scene_SRCDIR:=$(CURRENT_DIR)src/scene
 scene_SRCS:=$(wildcard $(scene_SRCDIR)/*.cpp)
 scene_OBJS:=$(scene_SRCS:.cpp=.o)
 
-learner_OBJS:=$(CURRENT_DIR)src/learner/vision_transformer.o
+network_SRCDIR:=$(CURRENT_DIR)src/network
+network_SRCS:=$(wildcard $(network_SRCDIR)/*.cpp)
+network_OBJS:=$(network_SRCS:.cpp=.o)
 
 all: default
 
-default: $(src_OBJS) $(math_OBJS) $(shader_OBJS) $(scene_OBJS) $(learner_OBJS)
-	$(CXX) $(src_OBJS) $(math_OBJS) $(shader_OBJS) $(scene_OBJS) $(learner_OBJS) $(LDFLAGS) -o $(TARGET)
+default: $(src_OBJS) $(math_OBJS) $(shader_OBJS) $(scene_OBJS) $(network_OBJS)
+	$(CXX) $(src_OBJS) $(math_OBJS) $(shader_OBJS) $(scene_OBJS) $(network_OBJS) $(LDFLAGS) -o $(TARGET)
 
 $(src_OBJS):%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -53,9 +61,13 @@ $(shader_OBJS):%.o: %.cpp
 $(scene_OBJS):%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(learner_OBJS): $(LEARNER_PATH)/src/network/vision_transformer.cpp
-	mkdir -p $(dir $@)
+$(network_OBJS):%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# copies the network sources again from prj-camera-image-learner, run make clean and make after it
+update-learner:
+	@test -d $(LEARNER_PATH)/src || { echo "Error: $(LEARNER_PATH)/src is missing, give it with make update-learner LEARNER_PATH=<directory>"; exit 1; }
+	for file in $(LEARNER_FILES); do cp $(LEARNER_PATH)/src/$$file $(CURRENT_DIR)src/$$file || exit 1; done
 
 clean:
 	rm -f $(TARGET)
@@ -63,4 +75,4 @@ clean:
 	rm -f $(math_SRCDIR)/*.o
 	rm -f $(shader_SRCDIR)/*.o
 	rm -f $(scene_SRCDIR)/*.o
-	rm -rf $(CURRENT_DIR)src/learner
+	rm -f $(network_SRCDIR)/*.o

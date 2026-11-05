@@ -56,6 +56,8 @@ bool ViewerScene::load(const std::string &imageDirectory, const std::string &sce
         TG_ERROR_LOG("No scenes in", imageDirectory);
         return false;
     }
+    TG_DEBUG_LOG("Using scene", name, "of", imageDirectory,
+                 scene.empty() ? "(the scene with the largest number, select another with --scene=<name>)" : "(--scene)");
     DistanceModel model;
     if (!model.load(modelFile)) {
         return false;

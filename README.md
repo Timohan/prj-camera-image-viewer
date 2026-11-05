@@ -4,18 +4,29 @@ with the vision transformer that prj-camera-image-learner trained, and the 6 cam
 that you can look around with OpenGL (prj-tg-ui-lib).
 
 # Building
-Needs prj-tg-ui-lib, OpenCV 4 and the sources of prj-camera-image-learner next to this directory
-(the vision transformer is compiled from them, another place can be given with `make LEARNER_PATH=<directory>`).
+Needs prj-tg-ui-lib and OpenCV 4, prj-camera-image-learner is not needed.
 
     make
+
+The vision transformer that reads the model files is a copy of the sources of prj-camera-image-learner
+(src/network and src/global_log.h). If the learner changes them (for example a new model file version), copy them
+again and build (the learner must be next to this directory or give its place with LEARNER_PATH):
+
+    make update-learner [LEARNER_PATH=<directory>]
+    make clean && make
 
 # Usage
     prj-camera-image-viewer [--imageDirectory=<directory>] [--scene=<name>] [--modelFile=<file>]
 
-- `--imageDirectory` images of prj-camera-image-creator, default is /home/timo/camera_output
+- `--imageDirectory` images of prj-camera-image-creator, default is `<cameraImageOutputDirectory>/camera_output`
+  (cameraImageOutputDirectory of configs/general.ini of this repository)
 - `--scene` images `<name>_1.png` ... `<name>_6.png` (and their .dat files, see below), for example
   `--scene=objects999_20261025-175558`, default is the scene that has the largest objects number
-- `--modelFile` model of prj-camera-image-learner, default is /home/timo/camera_model/vision_transformer.model
+- `--modelFile` model of prj-camera-image-learner, without it the model is
+  `<cameraImageOutputDirectory>/camera_model/vision_transformer.model`, or if it is missing, the newest .model file of
+  `<cameraImageOutputDirectory>/camera_model`, or if there is none, model/default.model of this repository (the used
+  file is printed). cameraImageOutputDirectory is in configs/general.ini of this repository (/mnt/camera), if it is
+  missing, model/default.model is used.
 
 Keys:
 - left/right arrow turn the view, up/down arrow turn it up or down
