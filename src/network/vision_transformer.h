@@ -1,6 +1,7 @@
 #ifndef VISION_TRANSFORMER_H
 #define VISION_TRANSFORMER_H
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <random>
@@ -56,7 +57,23 @@ public:
         int refineWindow = 0;   // odd width of the window of the pixel head hidden values that the refine step sees
         bool twoDistances = false;  // true: the pixel head gives two distances and the choice between them (pixel_label.h),
                                     // needs the pixel head and skyOutput
+        int geoInputs = 0;  // values of every pixel after its 3 colors in the image: 0 or GEO_INPUT_COUNT (geoInput())
+        int inputChannels() const { return 3 + geoInputs; }
     };
+
+    // values of a pixel from its distance from the other cameras (StereoMatcher, .geo file): normalized logarithm of the
+    // distance like the targets (0 if no camera matched), score and uniqueness of the match 0..1
+    static constexpr int GEO_INPUT_COUNT = 3;
+    static void geoInput(float distanceMm, int8_t score, int8_t unique, float targetMean, float targetScale, float *values)
+    {
+        if (distanceMm <= 0.0f) {
+            values[0] = values[1] = values[2] = 0.0f;
+            return;
+        }
+        values[0] = (std::log(distanceMm/1000.0f) - targetMean)/targetScale;
+        values[1] = static_cast<float>(score)/127.0f;
+        values[2] = static_cast<float>(unique)/127.0f;
+    }
 
     // values of a camera: the camera information block of the data file of prj-camera-image-creator
     static constexpr int CAMERA_VALUE_COUNT = 36;
@@ -94,7 +111,7 @@ public:
             std::vector<float> activated;   // after GELU
         };
         std::vector<std::vector<float>> m_gradients;
-        std::vector<float> m_patches;       // [tokens x patchSize*patchSize*3]
+        std::vector<float> m_patches;       // [tokens x patchSize*patchSize*inputChannels]
         std::vector<Layer> m_layers;
         std::vector<float> m_output;        // [tokens x dimension] output of the last block
         std::vector<float> m_normFinal;
@@ -158,7 +175,7 @@ private:
     };
     Config m_config;
     int m_tokenCount;
-    int m_patchInputCount;      // patchSize*patchSize*3
+    int m_patchInputCount;      // patchSize*patchSize*inputChannels
     int m_patchOutputCount;     // patchSize*patchSize
     int m_headOutputCount;      // m_patchOutputCount, with skyOutput 2*m_patchOutputCount (distances, then sky),
                                 // pixel head: m_patchOutputCount*pixelHidden

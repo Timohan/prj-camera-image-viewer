@@ -26,8 +26,8 @@ test: pkg-config --modversion prj-tg-ui-lib
 
     make
 
-The vision transformer that reads the model files is a copy of the sources of prj-camera-image-learner
-(src/network and src/global_log.h). If the learner changes them (for example a new model file version), copy them
+The vision transformer that reads the model files and the matching of the cameras are copies of the sources of
+prj-camera-image-learner (src/network, src/stereo and src/global_log.h). If the learner changes them (for example a new model file version), copy them
 again and build (the learner must be next to this directory or give its place with LEARNER_PATH):
 
     make update-learner [LEARNER_PATH=<directory>]
@@ -66,5 +66,9 @@ Every pixel is put to the camera position + distance along its ray through the l
 is used). Neighbouring pixels are joined to triangles, except over the edges of the surfaces: the correct
 edges are from the surface numbers of the .dat files and the predicted edges from the model, if it has the surface
 output (prj-camera-image-learner model file version 4). Without them a jump of the distance is an edge.
+A model that is trained with the distances from the other cameras (`prj-camera-image-learner --geo`, model file
+version 8) needs them also here: before the prediction the 6 images are matched with the cameras of the model exactly
+like the .geo files of the training (StereoMatcher, a few seconds with all CPU threads). model/default.model is such
+a model, so the 6 images of the scene must be from the cameras of the model.
 Pixels that the model predicts as sky are put far away (sky dome), so the model must have the sky output
 (prj-camera-image-learner model file version 2). Black areas are places that no camera sees.

@@ -22,8 +22,8 @@
 // version 2 has the sky output flag, version 1 files have no sky output,
 // version 3 has the pixel head size (pixelHidden, pixelWindow), version 4 has the surface output flag,
 // version 5 has the refine step size (refineHidden, refineWindow), version 6 has the two distances flag,
-// version 7 has the cameras after the weight tensors
-#define MODEL_FILE_VERSION  7
+// version 7 has the cameras after the weight tensors, version 8 has the geo inputs (geoInputs)
+#define MODEL_FILE_VERSION  8
 // a model file cannot have more cameras than this
 #define MODEL_MAX_CAMERAS   1000
 
@@ -46,7 +46,7 @@ static float geluDerivative(float x)
 VisionTransformer::VisionTransformer(const Config &config, unsigned int seed) :
     m_config(config),
     m_tokenCount((config.width/config.patchSize)*(config.height/config.patchSize)),
-    m_patchInputCount(config.patchSize*config.patchSize*3),
+    m_patchInputCount(config.patchSize*config.patchSize*config.inputChannels()),
     m_patchOutputCount(config.patchSize*config.patchSize),
     m_headOutputCount(config.pixelHidden > 0 ? m_patchOutputCount*config.pixelHidden
                                              : (config.skyOutput ? 2*m_patchOutputCount : m_patchOutputCount)),
@@ -167,7 +167,7 @@ const float *VisionTransformer::value(int parameter) const
 /*!
  * \brief VisionTransformer::forward
  * \param workspace keeps the values that backward() needs
- * \param image height x width x 3 colors row by row
+ * \param image height x width x inputChannels values row by row: 3 colors, then the geo inputs (geoInput())
  * \param output returns height x width values
  * \param skyOutput if not nullptr and the network has the sky output, returns height x width sky logits
  * \param surfaceOutput if not nullptr and the network has the surface output, returns height x width x SURFACE_OUTPUT_COUNT
@@ -181,14 +181,15 @@ void VisionTransformer::forward(Workspace *workspace, const float *image, float 
     const int dimension = m_config.dimension;
     const int count = m_tokenCount;
 
-    // tokens: colors of the patches and their positions
+    // tokens: colors (and geo inputs) of the patches and their positions
+    const int channels = m_config.inputChannels();
     for (int t=0;t<count;t++) {
         float *patch = workspace->m_patches.data() + t*m_patchInputCount;
         const int left = (t%columns)*patchSize;
         const int top = (t/columns)*patchSize;
         for (int py=0;py<patchSize;py++) {
-            const float *row = image + (static_cast<size_t>(top + py)*static_cast<size_t>(m_config.width) + static_cast<size_t>(left))*3;
-            std::copy(row, row + patchSize*3, patch + py*patchSize*3);
+            const float *row = image + (static_cast<size_t>(top + py)*static_cast<size_t>(m_config.width) + static_cast<size_t>(left))*channels;
+            std::copy(row, row + patchSize*channels, patch + py*patchSize*channels);
         }
     }
     float *x = workspace->m_layers.empty() ? workspace->m_output.data() : workspace->m_layers[0].input.data();
@@ -305,7 +306,7 @@ int VisionTransformer::skyOffset() const
 /*!
  * \brief VisionTransformer::pixelWindows
  * colors of the pixelWindow x pixelWindow pixels around every pixel, pixels outside the image are 0
- * \param image height x width x 3 colors
+ * \param image height x width x inputChannels values, only the 3 colors are used
  * \param pixelInputs returns [tokens*patchSize*patchSize x pixelWindow*pixelWindow*3], pixels token by token
  */
 void VisionTransformer::pixelWindows(const float *image, float *pixelInputs) const
@@ -325,7 +326,7 @@ void VisionTransformer::pixelWindows(const float *image, float *pixelInputs) con
                         std::fill(color, color + 3, 0.0f);
                     } else {
                         std::copy_n(image + (static_cast<size_t>(y + wy)*static_cast<size_t>(m_config.width)
-                                             + static_cast<size_t>(x + wx))*3, 3, color);
+                                             + static_cast<size_t>(x + wx))*m_config.inputChannels(), 3, color);
                     }
                 }
             }
@@ -945,10 +946,10 @@ const std::vector<VisionTransformer::Camera> &VisionTransformer::getCameras() co
 /*!
  * \brief VisionTransformer::save
  * saves the network to a binary file (native byte order, little-endian on x86):
- * char[4] "VITM", uint32_t version (7), int32_t width, height, patchSize, dimension, heads, layers, mlpDimension,
+ * char[4] "VITM", uint32_t version (8), int32_t width, height, patchSize, dimension, heads, layers, mlpDimension,
  * skyOutput (0 or 1, missing in version 1 files), pixelHidden, pixelWindow (missing in version 1 and 2 files),
  * surfaceOutput (0 or 1, missing in version 1-3 files), refineHidden, refineWindow (missing in version 1-4 files),
- * twoDistances (0 or 1, missing in version 1-5 files),
+ * twoDistances (0 or 1, missing in version 1-5 files), geoInputs (missing in version 1-7 files),
  * float targetMean, targetScale (distance = exp(output*targetScale + targetMean) meters),
  * uint32_t count of the weight tensors, then for every tensor uint32_t count of the values and the float values,
  * uint32_t count of the cameras (missing in version 1-6 files), then for every camera uint32_t number, width, height,
@@ -989,6 +990,7 @@ bool VisionTransformer::save(const std::string &filename, float targetMean, floa
         writeInt32(m_config.refineHidden);
         writeInt32(m_config.refineWindow);
         writeInt32(m_config.twoDistances ? 1 : 0);
+        writeInt32(m_config.geoInputs);
         writeFloat(targetMean);
         writeFloat(targetScale);
         writeUint32(static_cast<uint32_t>(m_parameters.size()));
@@ -1082,6 +1084,12 @@ std::unique_ptr<VisionTransformer> VisionTransformer::load(const std::string &fi
         file.read(reinterpret_cast<char *>(&twoDistances), sizeof(twoDistances));
         config.twoDistances = twoDistances != 0;
     }
+    // versions 1-7 have only the colors
+    if (version >= 8) {
+        int32_t geoInputs = 0;
+        file.read(reinterpret_cast<char *>(&geoInputs), sizeof(geoInputs));
+        config.geoInputs = geoInputs;
+    }
     file.read(reinterpret_cast<char *>(targetMean), sizeof(*targetMean));
     file.read(reinterpret_cast<char *>(targetScale), sizeof(*targetScale));
     file.read(reinterpret_cast<char *>(&tensorCount), sizeof(tensorCount));
@@ -1095,7 +1103,8 @@ std::unique_ptr<VisionTransformer> VisionTransformer::load(const std::string &fi
         || (config.pixelHidden > 0 && (config.pixelWindow <= 0 || config.pixelWindow%2 == 0))
         || (config.surfaceOutput && (config.pixelHidden <= 0 || !config.skyOutput)) || config.refineHidden < 0
         || (config.refineHidden > 0 && (config.pixelHidden <= 0 || config.refineWindow <= 0 || config.refineWindow%2 == 0))
-        || (config.twoDistances && (config.pixelHidden <= 0 || !config.skyOutput))) {
+        || (config.twoDistances && (config.pixelHidden <= 0 || !config.skyOutput))
+        || (config.geoInputs != 0 && config.geoInputs != GEO_INPUT_COUNT)) {
         TG_ERROR_LOG(filename, "has an invalid network size");
         return nullptr;
     }
