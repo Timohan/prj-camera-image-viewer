@@ -31,6 +31,11 @@
 #define STEREO_SCORE_SCALE          127.0f
 #define UNDISTORT_MAX_ITERATIONS    200
 #define UNDISTORT_EPSILON_PIXELS    0.001
+// fisheye: Newton iterations of the angle of the pixel (like createFisheyeImage() of prj-camera-image-creator) and
+// steps of 0-180 degrees when the largest angle with a growing distorted angle is searched
+#define FISHEYE_NEWTON_ITERATIONS   20
+#define FISHEYE_LIMIT_STEPS         3600
+#define FISHEYE_FIELD_OF_VIEW_INDEX 31
 // file format
 #define GEO_MAGIC                   "GEOM"
 #define GEO_VERSION                 1u
@@ -48,13 +53,32 @@ StereoMatcher::StereoMatcher()
 
 /*!
  * \brief StereoMatcher::CameraData::project
- * world point (mm) to the pixel of the camera with the pinhole lens distortion of OpenCV
- * \return false if the point is behind the camera
+ * world point (mm) to the pixel of the camera with the pinhole lens distortion of OpenCV or the fisheye model of OpenCV
+ * \return false if the point is behind the pinhole camera or outside of the field of view of the fisheye camera
  */
 bool StereoMatcher::CameraData::project(const Vector &point, double *u, double *v) const
 {
     const double dx = point.x - position.x, dy = point.y - position.y, dz = point.z - position.z;
     const double z = dot(dx, dy, dz, forward.x, forward.y, forward.z);
+    if (fisheye) {
+        // image y goes down
+        const double x = dot(dx, dy, dz, right.x, right.y, right.z);
+        const double y = -dot(dx, dy, dz, up.x, up.y, up.z);
+        const double radius = std::sqrt(x*x + y*y);
+        if (radius*radius + z*z <= 1.0) {
+            return false;
+        }
+        const double theta = std::atan2(radius, z);
+        if (theta > maxTheta) {
+            return false;
+        }
+        const double theta2 = theta*theta;
+        const double thetaD = theta*(1.0 + theta2*(fisheyeK[0] + theta2*(fisheyeK[1] + theta2*(fisheyeK[2] + theta2*fisheyeK[3]))));
+        const double scale = radius > 1e-12 ? thetaD/radius : 0.0;
+        *u = fx*x*scale + cx;
+        *v = fy*y*scale + cy;
+        return true;
+    }
     if (z <= 1.0) {
         return false;
     }
@@ -71,18 +95,89 @@ bool StereoMatcher::CameraData::project(const Vector &point, double *u, double *
 }
 
 /*!
+ * \brief StereoMatcher::CameraData::isValid
+ * \return true if the pixel is inside of the image and sees something
+ */
+bool StereoMatcher::CameraData::isValid(int x, int y) const
+{
+    return x >= 0 && y >= 0 && x < width && y < height && valid[static_cast<size_t>(y)*width + x];
+}
+
+/*!
+ * \brief StereoMatcher::setFisheyeRays
+ * rays of the pixels of the fisheye camera like createFisheyeImage() of prj-camera-image-creator renders them: the angle
+ * of the pixel from theta_d = theta*(1 + k1*theta^2 + ... + k4*theta^8) with Newton's method, the pixels over the field
+ * of view (or where theta_d does not grow anymore) do not see anything
+ * \param values camera values (fisheye k1-k4 27-30, field of view in degrees 31)
+ * \param camera camera with its size, directions, fx, fy, cx and cy
+ */
+void StereoMatcher::setFisheyeRays(const double *values, CameraData *camera)
+{
+    CameraData &c = *camera;
+    c.fisheye = true;
+    for (int j=0;j<4;j++) {
+        c.fisheyeK[j] = values[27 + j];
+    }
+    const double *k = c.fisheyeK;
+    c.maxTheta = std::min(M_PI, values[FISHEYE_FIELD_OF_VIEW_INDEX]/2.0*M_PI/180.0);
+    for (int i=1;i<=FISHEYE_LIMIT_STEPS;i++) {
+        const double theta = M_PI*static_cast<double>(i)/FISHEYE_LIMIT_STEPS;
+        const double theta2 = theta*theta;
+        if (1.0 + theta2*(3.0*k[0] + theta2*(5.0*k[1] + theta2*(7.0*k[2] + theta2*9.0*k[3]))) <= 0.0) {
+            c.maxTheta = std::min(c.maxTheta, theta);
+            break;
+        }
+    }
+    c.rays.resize(static_cast<size_t>(c.width)*c.height);
+    for (int y=0;y<c.height;y++) {
+        for (int x=0;x<c.width;x++) {
+            const size_t i = static_cast<size_t>(y)*c.width + x;
+            const double xd = (static_cast<double>(x) - c.cx)/c.fx, yd = (static_cast<double>(y) - c.cy)/c.fy;
+            const double thetaD = std::sqrt(xd*xd + yd*yd);
+            double theta = thetaD;
+            bool valid = true;
+            for (int iteration=0;iteration<FISHEYE_NEWTON_ITERATIONS;iteration++) {
+                const double theta2 = theta*theta;
+                const double value = theta*(1.0 + theta2*(k[0] + theta2*(k[1] + theta2*(k[2] + theta2*k[3])))) - thetaD;
+                const double derivative = 1.0 + theta2*(3.0*k[0] + theta2*(5.0*k[1] + theta2*(7.0*k[2] + theta2*9.0*k[3])));
+                if (derivative <= 0.0) {
+                    valid = false;
+                    break;
+                }
+                const double step = value/derivative;
+                theta -= step;
+                if (std::fabs(step) < 1e-10) {
+                    break;
+                }
+            }
+            if (!valid || theta < 0.0 || theta > c.maxTheta) {
+                c.valid[i] = 0;
+                c.rays[i] = c.forward;
+                continue;
+            }
+            // camera coordinates x right, y down, z forward
+            const double sinTheta = std::sin(theta);
+            const double rx = thetaD > 0.0 ? sinTheta*xd/thetaD : 0.0, ry = thetaD > 0.0 ? sinTheta*yd/thetaD : 0.0;
+            const double rz = std::cos(theta);
+            c.rays[i] = { c.right.x*rx - c.up.x*ry + c.forward.x*rz, c.right.y*rx - c.up.y*ry + c.forward.y*rz,
+                          c.right.z*rx - c.up.z*ry + c.forward.z*rz };
+        }
+    }
+}
+
+/*!
  * \brief StereoMatcher::setCameras
  * calculates the rays of the pixels and which cameras see the same areas
  * \param cameras cameras of the images (values like the data file of prj-camera-image-creator)
- * \return false if a camera is not a pinhole camera
+ * \return false if a camera has an unknown distortion model
  */
 bool StereoMatcher::setCameras(const std::vector<VisionTransformer::Camera> &cameras)
 {
     m_cameras.assign(cameras.size(), CameraData());
     for (size_t i=0;i<cameras.size();i++) {
         const VisionTransformer::Camera &camera = cameras[i];
-        if (camera.distortionModel != 0) {
-            TG_ERROR_LOG("Camera", camera.number, "is not a pinhole camera, matching supports only pinhole cameras");
+        if (camera.distortionModel != 0 && camera.distortionModel != 1) {
+            TG_ERROR_LOG("Camera", camera.number, "has unknown distortion model", camera.distortionModel);
             m_cameras.clear();
             return false;
         }
@@ -109,6 +204,12 @@ bool StereoMatcher::setCameras(const std::vector<VisionTransformer::Camera> &cam
         }
         c.p1 = v[25];
         c.p2 = v[26];
+        const size_t pixelCount = static_cast<size_t>(c.width)*c.height;
+        c.valid.assign(pixelCount, 1);
+        if (camera.distortionModel == 1) {
+            setFisheyeRays(v, &c);
+            continue;
+        }
         const cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << c.fx, 0.0, c.cx, 0.0, c.fy, c.cy, 0.0, 0.0, 1.0);
         const cv::Mat distortion = (cv::Mat_<double>(1, 8) << v[19], v[20], v[25], v[26], v[21], v[22], v[23], v[24]);
         std::vector<cv::Point2d> pixels, normalized;
@@ -137,6 +238,9 @@ bool StereoMatcher::setCameras(const std::vector<VisionTransformer::Camera> &cam
             const CameraData &B = m_cameras[b];
             for (int y=0;y<A.height && !m_overlap[a][b];y+=STEREO_OVERLAP_GRID) {
                 for (int x=0;x<A.width && !m_overlap[a][b];x+=STEREO_OVERLAP_GRID) {
+                    if (!A.valid[static_cast<size_t>(y)*A.width + x]) {
+                        continue;
+                    }
                     const Vector &r = A.rays[static_cast<size_t>(y)*A.width + x];
                     for (double t : STEREO_OVERLAP_DISTANCES) {
                         double u, v;
@@ -167,6 +271,11 @@ float StereoMatcher::patchScore(const CameraData &A, const CameraData &B, const 
                                 const std::vector<float> &grayB, int x, int y, double distance, int step) const
 {
     const size_t i = static_cast<size_t>(y)*A.width + x;
+    // the field of view of a fisheye is round, the patch is inside of it if its corners are
+    if (A.fisheye && (!A.isValid(x - STEREO_PATCH_HALF, y - STEREO_PATCH_HALF) || !A.isValid(x + STEREO_PATCH_HALF, y - STEREO_PATCH_HALF)
+                      || !A.isValid(x - STEREO_PATCH_HALF, y + STEREO_PATCH_HALF) || !A.isValid(x + STEREO_PATCH_HALF, y + STEREO_PATCH_HALF))) {
+        return -2.0f;
+    }
     const Vector &r = A.rays[i], &rx = A.rays[i + 1], &ry = A.rays[i + A.width];
     const Vector point = { A.position.x + r.x*distance, A.position.y + r.y*distance, A.position.z + r.z*distance };
     double u0, v0;
@@ -195,12 +304,33 @@ float StereoMatcher::patchScore(const CameraData &A, const CameraData &B, const 
         return -2.0f;
     }
     const double c = std::sqrt(0.5);
+    // the plane faces the camera: pinhole the direction of the camera, fisheye the ray of the pixel (it can be 90 degrees
+    // from the direction), tilted around the right and up of the camera or of the ray
+    Vector facing = A.forward, sideways = A.right, upwards = A.up;
+    if (A.fisheye) {
+        facing = r;
+        // right of the ray: horizontal, perpendicular to the ray (the right of the camera if the ray is vertical)
+        double sx = r.z, sz = -r.x;
+        double length = std::sqrt(sx*sx + sz*sz);
+        if (length < 0.1) {
+            const double along = dot(A.right.x, A.right.y, A.right.z, r.x, r.y, r.z);
+            sx = A.right.x - r.x*along;
+            sz = A.right.z - r.z*along;
+            const double sy = A.right.y - r.y*along;
+            length = std::sqrt(sx*sx + sy*sy + sz*sz);
+            sideways = { sx/length, sy/length, sz/length };
+        } else {
+            sideways = { sx/length, 0.0, sz/length };
+        }
+        // up of the ray = ray x right (left-handed world like setCameras())
+        upwards = { r.y*sideways.z - r.z*sideways.y, r.z*sideways.x - r.x*sideways.z, r.x*sideways.y - r.y*sideways.x };
+    }
     const Vector normals[] = {
-        A.forward, { 0.0, 1.0, 0.0 },
-        { (A.forward.x + A.right.x)*c, (A.forward.y + A.right.y)*c, (A.forward.z + A.right.z)*c },
-        { (A.forward.x - A.right.x)*c, (A.forward.y - A.right.y)*c, (A.forward.z - A.right.z)*c },
-        { (A.forward.x + A.up.x)*c, (A.forward.y + A.up.y)*c, (A.forward.z + A.up.z)*c },
-        { (A.forward.x - A.up.x)*c, (A.forward.y - A.up.y)*c, (A.forward.z - A.up.z)*c } };
+        facing, { 0.0, 1.0, 0.0 },
+        { (facing.x + sideways.x)*c, (facing.y + sideways.y)*c, (facing.z + sideways.z)*c },
+        { (facing.x - sideways.x)*c, (facing.y - sideways.y)*c, (facing.z - sideways.z)*c },
+        { (facing.x + upwards.x)*c, (facing.y + upwards.y)*c, (facing.z + upwards.z)*c },
+        { (facing.x - upwards.x)*c, (facing.y - upwards.y)*c, (facing.z - upwards.z)*c } };
     const double px = point.x - A.position.x, py = point.y - A.position.y, pz = point.z - A.position.z;
     float best = -2.0f;
     // the coarse search uses only the planes that face A and the horizontal plane (floor), the full patch all of them
@@ -232,6 +362,10 @@ float StereoMatcher::patchScore(const CameraData &A, const CameraData &B, const 
                     break;
                 }
                 const size_t j = static_cast<size_t>(y0)*B.width + x0;
+                if (B.fisheye && (!B.valid[j] || !B.valid[j + 1] || !B.valid[j + B.width] || !B.valid[j + B.width + 1])) {
+                    inside = false;
+                    break;
+                }
                 const float fx = static_cast<float>(u - x0), fy = static_cast<float>(v - y0);
                 patchB[n2] = (grayB[j]*(1.0f - fx) + grayB[j + 1]*fx)*(1.0f - fy)
                              + (grayB[j + B.width]*(1.0f - fx) + grayB[j + B.width + 1]*fx)*fy;
@@ -394,6 +528,9 @@ std::vector<StereoMatcher::GeoMap> StereoMatcher::match(const std::vector<const 
         map.score.assign(pixels, 0);
         map.unique.assign(pixels, 0);
         for (size_t i=0;i<pixels;i++) {
+            if (!A.valid[i]) {
+                continue;
+            }
             double bestBaseline = -1.0;
             for (int b=0;b<count;b++) {
                 if (pairs[a][b].empty() || pairs[b][a].empty()) {
@@ -418,7 +555,7 @@ std::vector<StereoMatcher::GeoMap> StereoMatcher::match(const std::vector<const 
                 }
                 const size_t j = static_cast<size_t>(vi)*B.width + ui;
                 const Candidate &back = pairs[b][a][j];
-                if (back.distance <= 0.0f) {
+                if (!B.valid[j] || back.distance <= 0.0f) {
                     continue;
                 }
                 const Vector &rb = B.rays[j];

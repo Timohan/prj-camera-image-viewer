@@ -15,7 +15,10 @@
  * a thinned patch finds the candidates, the full patch decides between them, the distance is refined between the
  * steps. The match is kept only if camera B matches back to the same point (left-right check). If many cameras match,
  * the one with the longest baseline across the ray is used, because it gives the most exact distance.
- * The cameras are fixed (the cameras of the model file), only pinhole cameras are supported.
+ * The cameras are fixed (the cameras of the model file), pinhole (OpenCV k1-k6, p1, p2) and fisheye (OpenCV fisheye k1-k4,
+ * up to the field of view of the lens, also over 180 degrees) cameras are supported. A fisheye camera warps the patch by
+ * the planes that face its pixel (the ray) instead of the direction of the camera, pixels outside of the field of view
+ * are not matched.
  * The result is the input of the model (GeoMap), so the training and the viewer must use the same matching.
  */
 class StereoMatcher
@@ -50,8 +53,13 @@ private:
         double fx, fy, cx, cy;
         double k[6];
         double p1, p2;
+        bool fisheye = false;
+        double fisheyeK[4];
+        double maxTheta = 0.0;      // fisheye: largest angle from the direction of the camera (radians)
         std::vector<Vector> rays;   // ray of every pixel center
+        std::vector<uint8_t> valid; // 1 if the pixel sees something (fisheye: inside of the field of view)
         bool project(const Vector &point, double *u, double *v) const;
+        bool isValid(int x, int y) const;
     };
     struct Candidate {
         float distance = -1.0f;
@@ -61,6 +69,7 @@ private:
     std::vector<CameraData> m_cameras;
     std::vector<std::vector<bool>> m_overlap;   // m_overlap[a][b]: B sees a part of the view of A
 
+    static void setFisheyeRays(const double *values, CameraData *camera);
     void matchPair(int a, int b, const std::vector<std::vector<float>> &gray, std::vector<Candidate> *result) const;
     float patchScore(const CameraData &A, const CameraData &B, const std::vector<float> &grayA,
                      const std::vector<float> &grayB, int x, int y, double distance, int step) const;
