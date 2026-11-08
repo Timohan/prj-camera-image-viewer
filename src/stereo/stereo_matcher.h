@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "network/vision_transformer.h"
+#include "stereo/stereo_core.h"
 
 /*!
  * \brief StereoMatcher
@@ -20,6 +21,7 @@
  * the planes that face its pixel (the ray) instead of the direction of the camera, pixels outside of the field of view
  * are not matched.
  * The result is the input of the model (GeoMap), so the training and the viewer must use the same matching.
+ * The matching of a pixel is in stereo_core.h, CudaStereoMatcher of prj-camera-image-learner runs the same code on the GPU.
  */
 class StereoMatcher
 {
@@ -34,6 +36,9 @@ public:
     };
 
     StereoMatcher();
+    // the cameras point to their own rays
+    StereoMatcher(const StereoMatcher &) = delete;
+    StereoMatcher &operator=(const StereoMatcher &) = delete;
     // cameras of the images, every image of match() is from the camera of the same index
     bool setCameras(const std::vector<VisionTransformer::Camera> &cameras);
     // rgbImages: width*height*3 bytes (RGB) of every camera, result of every camera
@@ -45,34 +50,23 @@ public:
     static bool load(const std::string &filename, GeoMap *map);
 
 private:
-    struct Vector { double x, y, z; };
-    struct CameraData {
-        int width = 0;
-        int height = 0;
-        Vector position, forward, up, right;
-        double fx, fy, cx, cy;
-        double k[6];
-        double p1, p2;
-        bool fisheye = false;
-        double fisheyeK[4];
-        double maxTheta = 0.0;      // fisheye: largest angle from the direction of the camera (radians)
-        std::vector<Vector> rays;   // ray of every pixel center
-        std::vector<uint8_t> valid; // 1 if the pixel sees something (fisheye: inside of the field of view)
-        bool project(const Vector &point, double *u, double *v) const;
-        bool isValid(int x, int y) const;
-    };
-    struct Candidate {
-        float distance = -1.0f;
-        float score = -2.0f;
-        float unique = 0.0f;
+    friend class CudaStereoMatcher;
+    typedef stereo::Vector Vector;
+    typedef stereo::Candidate Candidate;
+    // rays and valid of the camera point to rayData and validData
+    struct CameraData : stereo::Camera {
+        std::vector<Vector> rayData;
+        std::vector<uint8_t> validData;
     };
     std::vector<CameraData> m_cameras;
     std::vector<std::vector<bool>> m_overlap;   // m_overlap[a][b]: B sees a part of the view of A
 
     static void setFisheyeRays(const double *values, CameraData *camera);
+    static std::vector<std::vector<float>> toGray(const std::vector<CameraData> &cameras,
+                                                  const std::vector<const uint8_t *> &rgbImages);
     void matchPair(int a, int b, const std::vector<std::vector<float>> &gray, std::vector<Candidate> *result) const;
-    float patchScore(const CameraData &A, const CameraData &B, const std::vector<float> &grayA,
-                     const std::vector<float> &grayB, int x, int y, double distance, int step) const;
+    // left-right check and the camera with the longest baseline, pairs[a][b] is the result of matchPair(a, b)
+    std::vector<GeoMap> combine(const std::vector<std::vector<std::vector<Candidate>>> &pairs) const;
 };
 
 #endif // STEREO_MATCHER_H

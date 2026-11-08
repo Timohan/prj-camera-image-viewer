@@ -12,7 +12,7 @@ CXX:=$(if $(CXX),$(CXX),g++)
 # model files and it can be compiled without the learner, `make update-learner` copies them again from LEARNER_PATH
 LEARNER_PATH?=$(CURRENT_DIR)../prj-camera-image-learner
 LEARNER_FILES:=network/vision_transformer.h network/vision_transformer.cpp network/pixel_label.h global_log.h \
-               stereo/stereo_matcher.h stereo/stereo_matcher.cpp
+               stereo/stereo_core.h stereo/stereo_matcher.h stereo/stereo_matcher.cpp
 PKGFLAGS=`pkg-config --cflags --libs prj-tg-ui-lib opencv4`
 CXXFLAGS+=-g -O2 -Wall -pedantic -c -pipe -std=gnu++17 -W -D_REENTRANT -fPIC
 CXXFLAGS+=-I./src
