@@ -33,6 +33,45 @@ again and build (the learner must be next to this directory or give its place wi
     make update-learner [LEARNER_PATH=<directory>]
     make clean && make
 
+# Opening the created pictures (quick start)
+The pictures come from prj-camera-image-creator (see "Creating pictures (quick start)" of its README): key 's'
+saves the 6 pictures and data files of one scene, for example
+`objects1_20261108-092717_1.png` ... `objects1_20261108-092717_6.png` and their .dat files. The scene name is
+the file name without `_<camera number>.png`, here `objects1_20261108-092717`.
+
+1. Build the program:
+
+       make
+
+2. Non-fisheye pictures (cameraobjects_ids.ini of the creator, saved to /mnt/camera/camera_output): open the
+   viewer without arguments,
+
+       ./prj-camera-image-viewer
+
+   it uses /mnt/camera/camera_output (cameraImageOutputDirectory=/mnt/camera of configs/general.ini of this
+   repository), the scene with the largest objects number (objects10_... if objects1.dat ... objects10.dat were
+   saved) and the model /mnt/camera/camera_model/vision_transformer.model, or model/default.model if
+   /mnt/camera has no model (model/default.model is the model of the IDS cameras). The used scene and model are
+   printed.
+3. Fisheye pictures (cameraobjects_elp.ini of the creator, saved to /mnt/camera/fisheye/camera_output): give the
+   directory and the fisheye model, the IDS model cannot predict fisheye pictures:
+
+       ./prj-camera-image-viewer --imageDirectory=/mnt/camera/fisheye/camera_output --modelFile=default_fisheye.model
+
+   default_fisheye.model is the model of the ELP fisheye cameras of this repository.
+4. Another scene: give its name with --scene, for example objects5 of the fisheye pictures:
+
+       ./prj-camera-image-viewer --imageDirectory=/mnt/camera/fisheye/camera_output --modelFile=default_fisheye.model --scene=objects5_20261108-092801
+
+   (`ls /mnt/camera/fisheye/camera_output` shows the names). One window shows one scene, close the viewer and
+   open it again for another scene.
+5. In the window: the arrow keys turn the view, the mouse wheel moves it, keys 1-6 move to a camera and 0 to the
+   middle of the cameras, 't' changes between the predicted and the correct distances (the .dat files) and a left
+   click shows the distance of a point (see Keys below).
+
+The model must be of the same cameras as the pictures (positions and lenses), the viewer matches the 6 pictures
+with the cameras of the model before the prediction.
+
 # Usage
     prj-camera-image-viewer [--imageDirectory=<directory>] [--scene=<name>] [--modelFile=<file>]
 
