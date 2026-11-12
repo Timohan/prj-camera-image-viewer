@@ -43,27 +43,27 @@ the file name without `_<camera number>.png`, here `objects1_20261108-092717`.
 
        make
 
-2. Non-fisheye pictures (cameraobjects_ids.ini of the creator, saved to /mnt/camera/camera_output): open the
+2. Non-fisheye pictures (cameraobjects_ids.ini of the creator, saved to /mnt/cameras/camera_output): open the
    viewer without arguments,
 
        ./prj-camera-image-viewer
 
-   it uses /mnt/camera/camera_output (cameraImageOutputDirectory=/mnt/camera of configs/general.ini of this
+   it uses /mnt/cameras/camera_output (cameraImageOutputDirectory=/mnt/cameras of configs/general.ini of this
    repository), the scene with the largest objects number (objects10_... if objects1.dat ... objects10.dat were
-   saved) and the model /mnt/camera/camera_model/vision_transformer.model, or model/default.model if
-   /mnt/camera has no model (model/default.model is the model of the IDS cameras). The used scene and model are
+   saved) and the model /mnt/cameras/camera_model/vision_transformer.model, or model/default.model if
+   /mnt/cameras has no model (model/default.model is the model of the IDS cameras). The used scene and model are
    printed.
-3. Fisheye pictures (cameraobjects_elp.ini of the creator, saved to /mnt/camera/fisheye/camera_output): give the
+3. Fisheye pictures (cameraobjects_elp.ini of the creator, saved to /mnt/cameras/fisheye/camera_output): give the
    directory and the fisheye model, the IDS model cannot predict fisheye pictures:
 
-       ./prj-camera-image-viewer --imageDirectory=/mnt/camera/fisheye/camera_output --modelFile=default_fisheye.model
+       ./prj-camera-image-viewer --imageDirectory=/mnt/cameras/fisheye/camera_output --modelFile=default_fisheye.model
 
    default_fisheye.model is the model of the ELP fisheye cameras of this repository.
 4. Another scene: give its name with --scene, for example objects5 of the fisheye pictures:
 
-       ./prj-camera-image-viewer --imageDirectory=/mnt/camera/fisheye/camera_output --modelFile=default_fisheye.model --scene=objects5_20261108-092801
+       ./prj-camera-image-viewer --imageDirectory=/mnt/cameras/fisheye/camera_output --modelFile=default_fisheye.model --scene=objects5_20261108-092801
 
-   (`ls /mnt/camera/fisheye/camera_output` shows the names). One window shows one scene, close the viewer and
+   (`ls /mnt/cameras/fisheye/camera_output` shows the names). One window shows one scene, close the viewer and
    open it again for another scene.
 5. In the window: the arrow keys turn the view, the mouse wheel moves it, keys 1-6 move to a camera and 0 to the
    middle of the cameras, 't' changes between the predicted and the correct distances (the .dat files) and a left
@@ -82,7 +82,7 @@ with the cameras of the model before the prediction.
 - `--modelFile` model of prj-camera-image-learner, without it the model is
   `<cameraImageOutputDirectory>/camera_model/vision_transformer.model`, or if it is missing, the newest .model file of
   `<cameraImageOutputDirectory>/camera_model`, or if there is none, model/default.model of this repository (the used
-  file is printed). cameraImageOutputDirectory is in configs/general.ini of this repository (/mnt/camera), if it is
+  file is printed). cameraImageOutputDirectory is in configs/general.ini of this repository (/mnt/cameras), if it is
   missing, model/default.model is used.
 
 Keys:
