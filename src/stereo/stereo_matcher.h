@@ -43,6 +43,9 @@ public:
     bool setCameras(const std::vector<VisionTransformer::Camera> &cameras);
     // rgbImages: width*height*3 bytes (RGB) of every camera, result of every camera
     std::vector<GeoMap> match(const std::vector<const uint8_t *> &rgbImages) const;
+    // cameras of setCameras() with their rays and valid pixels (cross-camera loss of the joint model)
+    size_t getCameraCount() const { return m_cameras.size(); }
+    const stereo::Camera &getCamera(size_t index) const { return m_cameras[index]; }
 
     static bool save(const GeoMap &map, const std::string &filename);
     // bytes of the file of save()

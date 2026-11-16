@@ -99,6 +99,15 @@ bool ViewerScene::load(const std::string &imageDirectory, const std::string &sce
         TG_ERROR_LOG("No images", (std::filesystem::path(imageDirectory)/(name + "_1.png")).string());
         return false;
     }
+    // rig coordinates of the world boxes: the center of all cameras of the model like the learner
+    m_rigCenter[0] = m_rigCenter[1] = 0.0;
+    for (const VisionTransformer::Camera &camera : cameras) {
+        m_rigCenter[0] += camera.values[0]/static_cast<double>(cameras.size());
+        m_rigCenter[1] += camera.values[2]/static_cast<double>(cameras.size());
+    }
+    for (const auto &image : m_listCameraImage) {
+        image->setRigCenter(m_rigCenter[0], m_rigCenter[1]);
+    }
     TG_DEBUG_LOG("Scene", name + ":", m_listCameraImage.size(), "cameras,",
                  hasCorrectDistances() ? "correct distances from the data files" : "no data files (no correct distances)");
     std::vector<const cv::Mat *> images;
@@ -429,11 +438,13 @@ std::string ViewerScene::getPickedObjectText() const
     const int objectClass = static_cast<int>(std::max_element(group.classPixels, group.classPixels + OBJECT_CLASS_COUNT)
                                              - group.classPixels);
     const double count = static_cast<double>(std::max<size_t>(1, group.pixels));
-    double center[3], size[3];
+    // the world box of the model is in the rig coordinates (worldToRig())
+    double rig[3], center[3], size[3];
     for (int k=0;k<3;k++) {
-        center[k] = 1000.0*group.center[k]/count;
+        rig[k] = 1000.0*group.center[k]/count;
         size[k] = 1000.0*std::exp(group.logSize[k]/count);
     }
+    rigToWorld(rig, m_rigCenter[0], m_rigCenter[1], center);
     const double yaw = std::atan2(group.heading[1], group.heading[0])*180.0/M_PI;
     return "Predicted object " + std::to_string(id + 1) + " (" + cameraList(group.cameras) + "): "
         + image.objectText(objectClass, static_cast<int>(std::lround(100.0*group.probability/count)), center, size, yaw);

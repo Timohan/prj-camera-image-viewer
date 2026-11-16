@@ -24,6 +24,15 @@ enum PixelLabel : uint8_t {
 #define SURFACE_OUTPUT_COUNT    5
 #define SURFACE_RIGHT           3
 #define SURFACE_DOWN            4
+// cross-camera loss of the joint model (CudaVisionTransformer): the predicted point of a distance pixel of camera A
+// (along its ray) is projected into every other camera B of the scene, the predicted distance of B there (bilinear) must
+// be the distance of the point from B (normalized logarithms, Huber loss). Only points that B sees are compared: the
+// true point projected into B hits a pixel with the true distance within CROSS_CAMERA_VISIBLE (logarithm), and the four
+// pixels of the bilinear sample are distance pixels without a depth jump between them.
+// The loss is multiplied by CROSS_CAMERA_LOSS_WEIGHT for every pair of cameras before it is added to the distance loss.
+#define CROSS_CAMERA_LOSS_WEIGHT    0.25f
+#define CROSS_CAMERA_VISIBLE        0.02f
+
 // squared error of the normal and binary cross-entropy of the connections are multiplied by these
 // before they are added to the distance loss
 #define NORMAL_LOSS_WEIGHT      0.1f
@@ -232,12 +241,28 @@ PIXEL_LABEL_FUNCTION float twoDistanceLoss(float near, float gap, float choice, 
 #define OBJECT_OUTPUT_COUNT     (OBJECT_SIZE + 3)
 #define OBJECT_CENTER_SCALE     10.0f
 // with the object ids (VisionTransformer::Config::objectIds) every pixel has more object outputs after them: of a car
-// or a person the center of its box in the world (x, y, z, in OBJECT_CENTER_SCALE m) and its heading in the world (cos
-// and sin of the yaw of the objects file, 0 is +z, positive toward +x), the same for all cameras that see the object,
+// or a person the center of its box in the rig coordinates (x, y, z, in OBJECT_CENTER_SCALE m, worldToRig()) and its
+// heading in them (cos and sin of the yaw of the objects file, 0 is forward +y, positive toward +x), the same for all
+// cameras that see the object,
 // then OBJECT_ID_SIZE values of the id of the object (of every object that is not the ground, also the cubes, balls,
 // cylinders and cones): the pixels of the same object have near ids in all cameras of a scene and the means of the
 // ids of different objects are far from each other (objectIdLoss of the training, not a loss of one pixel)
 #define OBJECT_WORLD_CENTER     OBJECT_OUTPUT_COUNT
+// rig coordinates of the world box: the origin is the center of the cameras (mean of the camera positions) on the floor,
+// x right, y forward, z up (the floor is z = 0). The world of prj-camera-image-creator is x right, y up (the floor is
+// y = 0), z forward. center is the mean x and z of the camera positions of the world, all values in mm.
+inline void worldToRig(const double *world, double centerX, double centerZ, double *rig)
+{
+    rig[0] = world[0] - centerX;
+    rig[1] = world[2] - centerZ;
+    rig[2] = world[1];
+}
+inline void rigToWorld(const double *rig, double centerX, double centerZ, double *world)
+{
+    world[0] = rig[0] + centerX;
+    world[1] = rig[2];
+    world[2] = rig[1] + centerZ;
+}
 #define OBJECT_WORLD_HEADING    (OBJECT_WORLD_CENTER + 3)
 #define OBJECT_ID               (OBJECT_WORLD_HEADING + 2)
 #define OBJECT_ID_SIZE          8
@@ -249,7 +274,7 @@ PIXEL_LABEL_FUNCTION int objectOutputCount(bool objectIds)
 }
 // object target of every surface number of an image (ImageSamples::getObjectTable()): class (-1: no target, also
 // the sky), center x/y/z, heading cos/sin, logarithms of the sizes x/y/z, like the outputs, then the world center x/y/z
-// (in OBJECT_CENTER_SCALE m), world heading cos/sin and 1 if the world values are targets (0 in a mirrored image)
+// in the rig coordinates (worldToRig(), in OBJECT_CENTER_SCALE m), world heading cos/sin and 1 if the world values are targets (0 in a mirrored image)
 #define OBJECT_TABLE_VALUES     15
 #define OBJECT_TABLE_WORLD      9
 #define OBJECT_TABLE_WORLD_VALID 14

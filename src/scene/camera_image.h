@@ -80,8 +80,11 @@ public:
     int getCorrectClass(uint32_t surface) const;
     // predicted object of every pixel (-1: none), made by ViewerScene from the ids of all images
     void setPredictedObjectIds(const std::vector<int> &ids);
-    // "<class> (<probability>%), <sizes>, <distance from the camera> away, heading <yaw> degrees" of a box in the world
+    // "<class> (<probability>%), <sizes>, <distance from the camera> away, at x <x> m, y <y> m (rig coordinates),
+    // heading <yaw> degrees" of a box in the world
     std::string objectText(int objectClass, int probability, const double *center, const double *size, double yaw) const;
+    // center of the cameras (mean x and z of their positions in the world, mm) for the rig coordinates (worldToRig())
+    void setRigCenter(double x, double z);
 
     const cv::Mat &getImage() const;
     int getCameraNumber() const;
@@ -113,6 +116,7 @@ private:
     std::vector<VECTOR3> m_rays;            // normalized ray of every pixel in the world
     int m_cameraNumber;
     double m_position[3];                   // mm
+    double m_rigCenter[2] = { 0.0, 0.0 };   // x and z of the center of the cameras in the world, mm (setRigCenter())
     double m_direction[3];
     double m_right[3];                      // axes of the camera in the world: right, up (perpendicular to the direction)
     double m_up[3];

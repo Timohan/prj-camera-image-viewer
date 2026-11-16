@@ -60,7 +60,7 @@ private:
     bool m_fillGaps;            // black areas are filled with the fill meshes
     CameraImage::ObjectsMode m_objectsMode;  // images are tinted by the classes or the ids of the objects
     // predicted object of the ids (clusterObjects()): the cameras that see it (bit 0 is camera 1), its pixels, the
-    // sums of the world boxes of its pixels and the pixels of every predicted class
+    // sums of the world boxes of its pixels (rig coordinates, m) and the pixels of every predicted class
     struct ObjectGroup {
         uint32_t cameras = 0;
         uint32_t cameraPixels[32] = {};
@@ -72,6 +72,7 @@ private:
         size_t classPixels[OBJECT_CLASS_COUNT] = {};
     };
     std::vector<ObjectGroup> m_objectGroups;
+    double m_rigCenter[2] = { 0.0, 0.0 };   // x and z of the center of the model cameras in the world, mm (worldToRig())
     bool m_objectIds;           // the model has the object ids
     // cameras that see at least OBJECT_GROUP_MIN_PIXELS pixels of the correct objects (surface numbers)
     std::vector<uint32_t> m_correctObjectCameras;

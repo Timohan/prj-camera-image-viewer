@@ -661,13 +661,21 @@ std::string CameraImage::getObjectText(int x, int y, bool correctObjects) const
     return objectText(pixel.objectClass, pixel.probability, center, size, yaw);
 }
 
+void CameraImage::setRigCenter(double x, double z)
+{
+    m_rigCenter[0] = x;
+    m_rigCenter[1] = z;
+}
+
 /*!
  * \brief CameraImage::objectText
  * \param objectClass class of the model
  * \param probability percent, -1: not shown
  * \param center center of the box in the world (mm)
  * \param size width, height, length of the box (mm)
- * \param yaw degrees in the world, 0 is +z, positive turns to +x
+ * \param yaw degrees in the world, 0 is +z, positive turns to +x (the same in the rig coordinates: 0 is +y)
+ * \return text with the place in the rig coordinates (worldToRig(): origin at the center of the cameras on the floor,
+ * x right, y forward)
  */
 std::string CameraImage::objectText(int objectClass, int probability, const double *center, const double *size,
                                     double yaw) const
@@ -686,13 +694,17 @@ std::string CameraImage::objectText(int objectClass, int probability, const doub
     }
     // heading -180..180 degrees
     const double heading = yaw - 360.0*std::floor((yaw + 180.0)/360.0);
+    double rig[3];
+    worldToRig(center, m_rigCenter[0], m_rigCenter[1], rig);
     if (objectClass >= OBJECT_FIRST_PERSON_CLASS) {
-        snprintf(text + length, sizeof(text) - static_cast<size_t>(length), ", %.2f m tall, %.1f m away, heading %.0f degrees",
-                 size[1]/MM_PER_METER, std::sqrt(squared)/MM_PER_METER, heading);
+        snprintf(text + length, sizeof(text) - static_cast<size_t>(length),
+                 ", %.2f m tall, %.1f m away, at x %.1f m, y %.1f m, heading %.0f degrees", size[1]/MM_PER_METER,
+                 std::sqrt(squared)/MM_PER_METER, rig[0]/MM_PER_METER, rig[1]/MM_PER_METER, heading);
     } else {
         snprintf(text + length, sizeof(text) - static_cast<size_t>(length),
-                 ", %.2f m long, %.2f m wide, %.2f m high, %.1f m away, heading %.0f degrees", size[2]/MM_PER_METER,
-                 size[0]/MM_PER_METER, size[1]/MM_PER_METER, std::sqrt(squared)/MM_PER_METER, heading);
+                 ", %.2f m long, %.2f m wide, %.2f m high, %.1f m away, at x %.1f m, y %.1f m, heading %.0f degrees",
+                 size[2]/MM_PER_METER, size[0]/MM_PER_METER, size[1]/MM_PER_METER, std::sqrt(squared)/MM_PER_METER,
+                 rig[0]/MM_PER_METER, rig[1]/MM_PER_METER, heading);
     }
     return text;
 }
