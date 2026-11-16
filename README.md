@@ -104,11 +104,17 @@ Keys:
   the predicted class, the distance is from the camera to the center of the box, the heading is the yaw of the
   objects file (0 is +z, positive turns to +x). The model predicts the box at every pixel, so the pixels of one car can
   give a little different boxes.
-- o tints the images by the classes of the objects of the pixels or shows the images (the label at the top left
-  corner shows if it is on or off (default), only with the objects): the predicted objects with the predicted
-  distances, the correct objects of the .dat files with the correct distances. Colors: other object (cube, ball,
-  cylinder, cone) blue, sedan yellow, SUV orange, sports car red, man green, woman magenta, child cyan, the ground
-  and the sky are not tinted.
+- o changes the tint of the images: off (default), the classes of the objects, every object in its own color, off
+  (the label at the top left corner shows it, only with the objects): the predicted objects with the predicted
+  distances, the correct objects of the .dat files with the correct distances. Colors of the classes: other object
+  (cube, ball, cylinder, cone) blue, sedan yellow, SUV orange, sports car red, man green, woman magenta, child cyan,
+  the ground and the sky are not tinted. Every object in its own color: the correct objects are the surface numbers
+  of the .dat files (the same object has the same color in all cameras), the predicted objects need a model with the
+  object ids (`prj-camera-image-learner --joint --objects`): the pixels of all 6 images whose ids are near each other
+  are one object, so an object that many cameras see has one color in all of them.
+  With the object ids a click shows the object of the ids, for example `Predicted object 3 (cameras 1, 3): SUV (95%),
+  4.80 m long, ...`: the class of most of its pixels and the mean of the world boxes of all its pixels in all cameras,
+  the correct object shows its surface number and the cameras that see it.
 
 The camera positions and lenses are from the model (prj-camera-image-learner model file version 7, the training saves
 them), so only the png files are needed, the .dat files are read only for the correct distances if they are there.
@@ -124,5 +130,8 @@ a model, so the 6 images of the scene must be from the cameras of the model.
 A model that is trained with the objects (`prj-camera-image-learner --objects`, model file version 9, for example
 /mnt/camera/camera_training_objects/vision_transformer_objects.model) predicts also the object of every pixel (key o
 and the clicked pixel), the older models work as before.
+A joint model (`prj-camera-image-learner --joint`, model file version 10) sees the 6 images of the scene at once: they
+are predicted together (all CPU threads, about 7 seconds for 6 images of 247x206 after the matching), the scene must
+have the images of all cameras of the model.
 Pixels that the model predicts as sky are put far away (sky dome), so the model must have the sky output
 (prj-camera-image-learner model file version 2). Black areas are places that no camera sees.

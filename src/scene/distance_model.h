@@ -32,6 +32,7 @@ public:
         std::vector<CameraImage::ObjectPixel> objects;
     };
     bool hasObjectOutput() const;
+    bool hasObjectIds() const;
 
     std::vector<Prediction> predict(const std::vector<const cv::Mat *> &images) const;
 

@@ -16,11 +16,17 @@
 // one mouse wheel step moves the view camera this far (opengl units)
 #define MOVE_STEP               0.25f
 #define BACKGROUND_COLOR        0.08f, 0.08f, 0.10f, 1.0f
+// pixels whose ids are nearer than this to the mean id of an object are the object (the training pushes the means of
+// two objects at least 2*OBJECT_ID_PUSH_MARGIN apart and pulls the pixels to OBJECT_ID_PULL_MARGIN of their mean)
+#define OBJECT_GROUP_DISTANCE   OBJECT_ID_PUSH_MARGIN
+// an object of fewer pixels is not an object, a camera sees an object if it sees this many pixels of it
+#define OBJECT_GROUP_MIN_PIXELS 10
 
 ViewerScene::ViewerScene() :
     m_correctDistances(false),
     m_fillGaps(false),
-    m_showObjects(false),
+    m_objectsMode(CameraImage::ObjectsOff),
+    m_objectIds(false),
     m_position({ 0.0f, 1.0f, 0.0f }),
     m_yaw(0.0f),
     m_pitch(0.0f),
@@ -109,6 +115,35 @@ bool ViewerScene::load(const std::string &imageDirectory, const std::string &sce
         m_listCameraImage[i]->setPrediction(predictions[i].distances, predictions[i].sky, predictions[i].connections,
                                             predictions[i].objects);
     }
+    m_objectIds = model.hasObjectIds();
+    if (m_objectIds) {
+        const auto clusterStart = std::chrono::steady_clock::now();
+        clusterObjects();
+        TG_DEBUG_LOG("Objects of the ids:", m_objectGroups.size(), "objects in",
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - clusterStart).count(), "s");
+    }
+    // cameras that see the correct objects
+    for (size_t i=0;i<m_listCameraImage.size() && i<32;i++) {
+        const CameraImage &image = *m_listCameraImage[i];
+        std::vector<uint32_t> pixels;
+        for (uint32_t surface : image.getCorrectSurfaces()) {
+            if (image.getCorrectClass(surface) < 1) {
+                continue;
+            }
+            if (pixels.size() <= surface) {
+                pixels.resize(static_cast<size_t>(surface) + 1, 0);
+            }
+            pixels[surface]++;
+        }
+        if (m_correctObjectCameras.size() < pixels.size()) {
+            m_correctObjectCameras.resize(pixels.size(), 0);
+        }
+        for (size_t surface=0;surface<pixels.size();surface++) {
+            if (pixels[surface] >= OBJECT_GROUP_MIN_PIXELS) {
+                m_correctObjectCameras[surface] |= 1u << i;
+            }
+        }
+    }
     moveToCamera(0);
     return true;
 }
@@ -186,14 +221,14 @@ void ViewerScene::render(float width, float height)
         glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
     }
     for (const auto &image : m_listCameraImage) {
-        image->render(m_correctDistances, false, m_showObjects);
+        image->render(m_correctDistances, false, m_objectsMode);
     }
     if (m_fillGaps) {
         // fill meshes only on the pixels that no mesh has drawn (black areas), so they never hide a real surface
         glStencilFunc(GL_EQUAL, 0, 0xFF);
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         for (const auto &image : m_listCameraImage) {
-            image->render(m_correctDistances, true, m_showObjects);
+            image->render(m_correctDistances, true, m_objectsMode);
         }
         glDisable(GL_STENCIL_TEST);
     }
@@ -378,8 +413,169 @@ std::string ViewerScene::getPickedObjectText() const
         return "Object: N/A";
     }
     const CameraImage &image = *m_listCameraImage[static_cast<size_t>(m_pickedImage)];
-    return (m_correctDistances ? "Correct object: " : "Predicted object: ")
-        + image.getObjectText(m_pickedPixelX, m_pickedPixelY, m_correctDistances);
+    const int id = image.getObjectId(m_pickedPixelX, m_pickedPixelY, m_correctDistances);
+    if (m_correctDistances) {
+        std::string text = "Correct object";
+        if (id >= 0 && static_cast<size_t>(id) < m_correctObjectCameras.size()) {
+            text += " " + std::to_string(id) + " (" + cameraList(m_correctObjectCameras[static_cast<size_t>(id)]) + ")";
+        }
+        return text + ": " + image.getObjectText(m_pickedPixelX, m_pickedPixelY, true);
+    }
+    if (id < 0 || static_cast<size_t>(id) >= m_objectGroups.size()) {
+        return "Predicted object: " + image.getObjectText(m_pickedPixelX, m_pickedPixelY, false);
+    }
+    // the object of the ids: its class is the class of most of its pixels, its box the mean of the world boxes
+    const ObjectGroup &group = m_objectGroups[static_cast<size_t>(id)];
+    const int objectClass = static_cast<int>(std::max_element(group.classPixels, group.classPixels + OBJECT_CLASS_COUNT)
+                                             - group.classPixels);
+    const double count = static_cast<double>(std::max<size_t>(1, group.pixels));
+    double center[3], size[3];
+    for (int k=0;k<3;k++) {
+        center[k] = 1000.0*group.center[k]/count;
+        size[k] = 1000.0*std::exp(group.logSize[k]/count);
+    }
+    const double yaw = std::atan2(group.heading[1], group.heading[0])*180.0/M_PI;
+    return "Predicted object " + std::to_string(id + 1) + " (" + cameraList(group.cameras) + "): "
+        + image.objectText(objectClass, static_cast<int>(std::lround(100.0*group.probability/count)), center, size, yaw);
+}
+
+/*!
+ * \brief ViewerScene::cameraList
+ * \return "camera 2" or "cameras 1, 3, 5" of the bits of the cameras (bit 0 is camera 1)
+ */
+std::string ViewerScene::cameraList(uint32_t cameras)
+{
+    std::string list;
+    int count = 0;
+    for (int i=0;i<32;i++) {
+        if (cameras & (1u << i)) {
+            list += (count++ > 0 ? ", " : "") + std::to_string(i + 1);
+        }
+    }
+    return (count == 1 ? "camera " : "cameras ") + list;
+}
+
+/*!
+ * \brief ViewerScene::clusterObjects
+ * makes the objects of the ids of the pixels of all images: the pixels of the objects (not the sky and the ground) are
+ * taken one by one, a pixel is a part of the object whose mean id is the nearest, if it is nearer than
+ * OBJECT_GROUP_DISTANCE, otherwise it starts a new object (the mean is updated with every pixel). Then every pixel is
+ * given to the nearest final mean again (nearer than OBJECT_GROUP_DISTANCE), objects of fewer than
+ * OBJECT_GROUP_MIN_PIXELS pixels are left out, the largest object is 0. The objects of every image are set to the image
+ * (CameraImage::setPredictedObjectIds()).
+ */
+void ViewerScene::clusterObjects()
+{
+    std::vector<std::vector<double>> means;    // OBJECT_ID_SIZE sums of the ids of every object
+    std::vector<size_t> counts;
+    auto nearest = [&](const float *id, bool sums, double *distance) {
+        int best = -1;
+        double bestSquared = OBJECT_GROUP_DISTANCE*OBJECT_GROUP_DISTANCE;
+        for (size_t g=0;g<means.size();g++) {
+            if (counts[g] == 0) {
+                continue;
+            }
+            double squared = 0.0;
+            for (int k=0;k<OBJECT_ID_SIZE;k++) {
+                const double mean = sums ? means[g][static_cast<size_t>(k)]/static_cast<double>(counts[g]) : means[g][static_cast<size_t>(k)];
+                squared += (id[k] - mean)*(id[k] - mean);
+                if (squared >= bestSquared) {
+                    break;
+                }
+            }
+            if (squared < bestSquared) {
+                bestSquared = squared;
+                best = static_cast<int>(g);
+            }
+        }
+        *distance = std::sqrt(bestSquared);
+        return best;
+    };
+    auto isObject = [](const CameraImage::ObjectPixel &pixel) {
+        return pixel.hasId && pixel.objectClass >= 1 && pixel.objectClass < OBJECT_CLASS_COUNT;
+    };
+    // 1. one pass: the objects and their means
+    for (const auto &image : m_listCameraImage) {
+        for (const CameraImage::ObjectPixel &pixel : image->getPredictedObjects()) {
+            if (!isObject(pixel)) {
+                continue;
+            }
+            double distance;
+            const int g = nearest(pixel.id, true, &distance);
+            if (g < 0) {
+                means.emplace_back(pixel.id, pixel.id + OBJECT_ID_SIZE);
+                counts.push_back(1);
+                continue;
+            }
+            for (int k=0;k<OBJECT_ID_SIZE;k++) {
+                means[static_cast<size_t>(g)][static_cast<size_t>(k)] += pixel.id[k];
+            }
+            counts[static_cast<size_t>(g)]++;
+        }
+    }
+    for (size_t g=0;g<means.size();g++) {
+        for (double &value : means[g]) {
+            value /= static_cast<double>(counts[g]);
+        }
+    }
+    // 2. every pixel to the nearest final mean
+    std::vector<std::vector<int>> ids(m_listCameraImage.size());
+    std::vector<ObjectGroup> groups(means.size());
+    for (size_t i=0;i<m_listCameraImage.size();i++) {
+        const std::vector<CameraImage::ObjectPixel> &pixels = m_listCameraImage[i]->getPredictedObjects();
+        ids[i].assign(pixels.size(), -1);
+        for (size_t p=0;p<pixels.size();p++) {
+            const CameraImage::ObjectPixel &pixel = pixels[p];
+            if (!isObject(pixel)) {
+                continue;
+            }
+            double distance;
+            const int g = nearest(pixel.id, false, &distance);
+            if (g < 0) {
+                continue;
+            }
+            ids[i][p] = g;
+            ObjectGroup &group = groups[static_cast<size_t>(g)];
+            group.pixels++;
+            if (i < 32) {
+                group.cameraPixels[i]++;
+            }
+            group.classPixels[pixel.objectClass]++;
+            group.probability += pixel.probability;
+            for (int k=0;k<3;k++) {
+                group.center[k] += pixel.worldCenter[k];
+                group.logSize[k] += std::log(std::max(1e-3f, pixel.size[k]));
+            }
+            group.heading[0] += pixel.worldHeading[0];
+            group.heading[1] += pixel.worldHeading[1];
+        }
+    }
+    // 3. the objects of enough pixels, the largest first
+    std::vector<size_t> order;
+    for (size_t g=0;g<groups.size();g++) {
+        if (groups[g].pixels >= OBJECT_GROUP_MIN_PIXELS) {
+            order.push_back(g);
+        }
+    }
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return groups[a].pixels > groups[b].pixels; });
+    std::vector<int> number(groups.size(), -1);
+    m_objectGroups.clear();
+    for (size_t g : order) {
+        number[g] = static_cast<int>(m_objectGroups.size());
+        ObjectGroup group = groups[g];
+        for (int i=0;i<32;i++) {
+            if (group.cameraPixels[i] >= OBJECT_GROUP_MIN_PIXELS) {
+                group.cameras |= 1u << i;
+            }
+        }
+        m_objectGroups.push_back(group);
+    }
+    for (size_t i=0;i<m_listCameraImage.size();i++) {
+        for (int &id : ids[i]) {
+            id = id >= 0 ? number[static_cast<size_t>(id)] : -1;
+        }
+        m_listCameraImage[i]->setPredictedObjectIds(ids[i]);
+    }
 }
 
 /*!
@@ -448,18 +644,38 @@ void ViewerScene::toggleObjects()
         TG_DEBUG_LOG("The model has no object output and the data files have no objects");
         return;
     }
-    m_showObjects = !m_showObjects;
-    TG_DEBUG_LOG(m_showObjects ? "Objects are shown (other object blue, sedan yellow, SUV orange, sports car red, man green, "
-                                 "woman magenta, child cyan)" : "Objects are not shown");
+    // off, classes, objects (ids: the predicted ones need the object ids of the model, the correct ones are the
+    // surface numbers), off
+    if (m_objectsMode == CameraImage::ObjectsOff) {
+        m_objectsMode = CameraImage::ObjectsClasses;
+    } else if (m_objectsMode == CameraImage::ObjectsClasses && (m_objectIds || hasCorrectDistances())) {
+        m_objectsMode = CameraImage::ObjectsIds;
+    } else {
+        m_objectsMode = CameraImage::ObjectsOff;
+    }
+    TG_DEBUG_LOG(m_objectsMode == CameraImage::ObjectsClasses
+                     ? "Classes of the objects are shown (other object blue, sedan yellow, SUV orange, sports car red, "
+                       "man green, woman magenta, child cyan)"
+                     : m_objectsMode == CameraImage::ObjectsIds ? "Every object is shown in its own color"
+                                                                : "Objects are not shown");
 }
 
 /*!
- * \brief ViewerScene::getShowObjects
- * \return true if the images are tinted by the classes of the objects
+ * \brief ViewerScene::getObjectsMode
+ * \return tint of the images: none, the classes or the ids of the objects
  */
-bool ViewerScene::getShowObjects() const
+CameraImage::ObjectsMode ViewerScene::getObjectsMode() const
 {
-    return m_showObjects;
+    return m_objectsMode;
+}
+
+/*!
+ * \brief ViewerScene::hasObjectIds
+ * \return true if the model has the object ids (every object of the predicted ids is one object in all cameras)
+ */
+bool ViewerScene::hasObjectIds() const
+{
+    return m_objectIds;
 }
 
 /*!

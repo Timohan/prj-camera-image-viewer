@@ -33,7 +33,14 @@
  * the chosen one (chosenDistance() of pixel_label.h), so an edge pixel is the near or the far surface instead of their mean.
  * With objectOutput the pixel head gives also the object of every pixel (OBJECT_OUTPUT_COUNT values of pixel_label.h):
  * the class of the object (ground, unknown object, sedan, SUV, sports car, man, woman, child) and of a car or a person
- * the center, the heading and the sizes of its box in the camera.
+ * the center, the heading and the sizes of its box in the camera. With objectIds also the center and the heading of
+ * the box in the world and the id of the object (the same object has near ids in all cameras of a scene).
+ * With cameraGroup > 1 the network sees the images of all cameras of a scene at once (joint model): the tokens of the
+ * cameraGroup images of a scene (the cameras 1, 2, ... in this order) are one sequence in the joint blocks
+ * (jointLayer()), so the attention of every token compares it with the tokens of all cameras, the other blocks
+ * compare the tokens of one image. Every camera has its own position embeddings, so a token knows its camera and the
+ * place in it. forwardGroup() predicts the images of one scene, forward() and backward() are only for cameraGroup 1
+ * (the joint model is trained on the GPU).
  *
  * The model file has also the cameras of the training images (position, direction and lens of every camera,
  * all images of a camera are from the same place), so a viewer needs only the images and the model file.
@@ -63,7 +70,14 @@ public:
                                     // needs the pixel head and skyOutput
         int geoInputs = 0;  // values of every pixel after its 3 colors in the image: 0 or GEO_INPUT_COUNT (geoInput())
         bool objectOutput = false;  // true: every pixel has also the object outputs, needs surfaceOutput
+        int cameraGroup = 1;        // images of a scene (cameras) that the joint blocks see together, 1: every image alone
+        int jointEvery = 1;         // with cameraGroup > 1 every jointEvery'th block is joint (1: all blocks)
+        bool objectIds = false;     // true: the object outputs have also the world box and the id of the object
+                                    // (objectOutputCount() of pixel_label.h), needs objectOutput, trained on the GPU
+        int objectValues() const { return objectOutput ? objectOutputCount(objectIds) : 0; }
         int inputChannels() const { return 3 + geoInputs; }
+        // true if the block l sees the tokens of all images of the scene
+        bool jointLayer(int l) const { return cameraGroup > 1 && jointEvery > 0 && (l + 1)%jointEvery == 0; }
     };
 
     // values of a pixel from its distance from the other cameras (StereoMatcher, .geo file): normalized logarithm of the
@@ -155,6 +169,15 @@ public:
     std::vector<float> &getParameter(int parameter);
     void forward(Workspace *workspace, const float *image, float *output, float *skyOutput = nullptr,
                  float *surfaceOutput = nullptr, float *objectOutput = nullptr) const;
+    // outputs of the images of one scene (forwardGroup()), every pointer can be nullptr, the lists can be empty
+    struct GroupOutputs {
+        std::vector<float *> output;
+        std::vector<float *> skyOutput;
+        std::vector<float *> surfaceOutput;
+        std::vector<float *> objectOutput;
+    };
+    void forwardGroup(const std::vector<Workspace *> &workspaces, const std::vector<const float *> &images,
+                      const GroupOutputs &outputs, int threadCount) const;
     double backward(Workspace *workspace, const float *target, const uint8_t *labels, double *skyLoss = nullptr,
                     const float *normals = nullptr, const int32_t *surfaces = nullptr, double *surfaceLoss = nullptr,
                     const float *objectTable = nullptr, double *objectLoss = nullptr) const;
@@ -216,6 +239,12 @@ private:
     static void layerNormBackward(const float *outputGradient, const float *norm, const float *rstd, int count, int dimension,
                                   const float *gain, float *gainGradient, float *biasGradient, float *inputGradient);
     void attentionForward(Workspace::Layer *layer) const;
+    void groupAttentionForward(const std::vector<Workspace *> &workspaces, int l, int image, int head, float *row) const;
+    void embedForward(Workspace *workspace, const float *image, int camera) const;
+    void blockStartForward(Workspace *workspace, int l) const;
+    void blockEndForward(Workspace *workspace, int l) const;
+    void headForward(Workspace *workspace, const float *image, float *output, float *skyOutput, float *surfaceOutput,
+                     float *objectOutput) const;
     void attentionBackward(const Workspace::Layer &layer, const float *attentionGradient, float *qkvGradient,
                            float *rowBuffer) const;
     void pixelWindows(const float *image, float *pixelInputs) const;

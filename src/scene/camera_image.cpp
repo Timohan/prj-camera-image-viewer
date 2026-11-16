@@ -56,6 +56,21 @@ static const int OBJECT_COLORS[OBJECT_CLASS_COUNT][3] = {
 };
 static_assert(OBJECT_CLASS_COUNT == 8, "names and colors of the object classes");
 
+// RGB color of an object (id): the hues of the golden angle, so the neighbouring ids have different colors
+static void idColor(int id, int *rgb)
+{
+    const double hue = std::fmod(static_cast<double>(id)*0.618033988749895, 1.0)*6.0;
+    const int sector = static_cast<int>(hue);
+    const double f = hue - sector;
+    const double value = 255.0, low = 0.25*value, high = value;
+    const double rising = low + (high - low)*f, falling = high - (high - low)*f;
+    const double colors[6][3] = { { high, rising, low }, { falling, high, low }, { low, high, rising },
+                                  { low, falling, high }, { rising, low, high }, { high, low, falling } };
+    for (int c=0;c<3;c++) {
+        rgb[c] = static_cast<int>(colors[sector%6][c]);
+    }
+}
+
 CameraImage::CameraImage() :
     m_cameraNumber(0),
     m_position{ 0.0, 0.0, 0.0 },
@@ -64,7 +79,9 @@ CameraImage::CameraImage() :
     m_up{ 0.0, 1.0, 0.0 },
     m_texture(0),
     m_correctObjectTexture(0),
-    m_predictedObjectTexture(0)
+    m_predictedObjectTexture(0),
+    m_correctIdTexture(0),
+    m_predictedIdTexture(0)
 {
 }
 
@@ -74,7 +91,8 @@ CameraImage::~CameraImage()
     deleteMesh(&m_predictedMesh);
     deleteMesh(&m_correctFillMesh);
     deleteMesh(&m_predictedFillMesh);
-    for (GLuint texture : { m_texture, m_correctObjectTexture, m_predictedObjectTexture }) {
+    for (GLuint texture : { m_texture, m_correctObjectTexture, m_predictedObjectTexture, m_correctIdTexture,
+                            m_predictedIdTexture }) {
         if (texture) {
             glDeleteTextures(1, &texture);
         }
@@ -346,10 +364,11 @@ GLuint CameraImage::createTexture(const cv::Mat &image) const
 /*!
  * \brief CameraImage::tintImage
  * \param correctObjects true: the objects of the data file, false: the objects predicted by the model
- * \return the image mixed with the color of the class of the object of every pixel (OBJECT_COLORS), the sky and the
- * ground keep their colors
+ * \param ids true: every object in its own color (idColor() of getObjectId()), false: the color of the class
+ * \return the image mixed with the color of the class of the object of every pixel (OBJECT_COLORS) or of the object,
+ * the sky and the ground keep their colors
  */
-cv::Mat CameraImage::tintImage(bool correctObjects) const
+cv::Mat CameraImage::tintImage(bool correctObjects, bool ids) const
 {
     cv::Mat image = m_image.clone();
     for (int y=0;y<image.rows;y++) {
@@ -369,8 +388,16 @@ cv::Mat CameraImage::tintImage(bool correctObjects) const
             if (objectClass < 0 || OBJECT_COLORS[objectClass][0] < 0) {
                 continue;
             }
+            int color[3] = { OBJECT_COLORS[objectClass][0], OBJECT_COLORS[objectClass][1], OBJECT_COLORS[objectClass][2] };
+            if (ids) {
+                const int id = getObjectId(x, y, correctObjects);
+                if (id < 0) {
+                    continue;
+                }
+                idColor(id, color);
+            }
             for (int c=0;c<3;c++) {
-                row[x][c] = static_cast<uint8_t>(std::lround((1.0 - OBJECT_TINT)*row[x][c] + OBJECT_TINT*OBJECT_COLORS[objectClass][c]));
+                row[x][c] = static_cast<uint8_t>(std::lround((1.0 - OBJECT_TINT)*row[x][c] + OBJECT_TINT*color[c]));
             }
         }
     }
@@ -387,10 +414,14 @@ int CameraImage::createMeshes(GLint vertexAttribute, GLint textureCoordinateAttr
 {
     m_texture = createTexture(m_image);
     if (hasCorrectObjects()) {
-        m_correctObjectTexture = createTexture(tintImage(true));
+        m_correctObjectTexture = createTexture(tintImage(true, false));
+        m_correctIdTexture = createTexture(tintImage(true, true));
     }
     if (hasPredictedObjects()) {
-        m_predictedObjectTexture = createTexture(tintImage(false));
+        m_predictedObjectTexture = createTexture(tintImage(false, false));
+    }
+    if (!m_predictedObjectIds.empty()) {
+        m_predictedIdTexture = createTexture(tintImage(false, true));
     }
     // without the data file only the predicted distances are known
     if (hasCorrectDistances()) {
@@ -528,16 +559,21 @@ void CameraImage::uploadMesh(const std::vector<float> &vertices, GLint vertexAtt
  * \brief CameraImage::render
  * \param correctDistances true: mesh of the correct distances, false: mesh of the predicted distances
  * \param fillMesh true: the fill mesh (triangles over the edges)
- * \param objects true: the image tinted by the classes of the objects (the correct ones with the correct distances),
- * the image itself if those objects are not known
+ * \param objectsMode the image tinted by the classes or the ids of the objects (the correct ones with the correct
+ * distances), the image itself if those objects are not known
  */
-void CameraImage::render(bool correctDistances, bool fillMesh, bool objects) const
+void CameraImage::render(bool correctDistances, bool fillMesh, ObjectsMode objectsMode) const
 {
     const Mesh &mesh = fillMesh ? (correctDistances ? m_correctFillMesh : m_predictedFillMesh)
                                 : (correctDistances ? m_correctMesh : m_predictedMesh);
-    const GLuint objectTexture = correctDistances ? m_correctObjectTexture : m_predictedObjectTexture;
+    GLuint texture = m_texture;
+    if (objectsMode == ObjectsClasses) {
+        texture = correctDistances ? m_correctObjectTexture : m_predictedObjectTexture;
+    } else if (objectsMode == ObjectsIds) {
+        texture = correctDistances ? m_correctIdTexture : m_predictedIdTexture;
+    }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, objects && objectTexture ? objectTexture : m_texture);
+    glBindTexture(GL_TEXTURE_2D, texture ? texture : m_texture);
     glBindVertexArray(mesh.vertexArray);
     glDrawArrays(GL_TRIANGLES, 0, mesh.vertexCount);
     glBindVertexArray(0);
@@ -659,6 +695,56 @@ std::string CameraImage::objectText(int objectClass, int probability, const doub
                  size[0]/MM_PER_METER, size[1]/MM_PER_METER, std::sqrt(squared)/MM_PER_METER, heading);
     }
     return text;
+}
+
+/*!
+ * \brief CameraImage::getObjectId
+ * \param correctObjects true: the surface number of the data file if it is an object (not the sky or the ground),
+ * false: the predicted object of setPredictedObjectIds()
+ * \return the object of the pixel, -1: none
+ */
+int CameraImage::getObjectId(int x, int y, bool correctObjects) const
+{
+    if (x < 0 || y < 0 || x >= m_image.cols || y >= m_image.rows) {
+        return -1;
+    }
+    const size_t i = static_cast<size_t>(y)*m_image.cols + x;
+    if (correctObjects) {
+        if (!hasCorrectObjects()) {
+            return -1;
+        }
+        return getCorrectClass(m_correctSurfaces[i]) >= 1 ? static_cast<int>(m_correctSurfaces[i]) : -1;
+    }
+    return i < m_predictedObjectIds.size() ? m_predictedObjectIds[i] : -1;
+}
+
+const std::vector<CameraImage::ObjectPixel> &CameraImage::getPredictedObjects() const
+{
+    return m_predictedObjects;
+}
+
+const std::vector<uint32_t> &CameraImage::getCorrectSurfaces() const
+{
+    return m_correctSurfaces;
+}
+
+/*!
+ * \brief CameraImage::getCorrectClass
+ * \return class of the model (0 ground, 1 other object ... 7 child) of the correct object of the surface, -1 for the
+ * sky and the surfaces that have no object
+ */
+int CameraImage::getCorrectClass(uint32_t surface) const
+{
+    if (surface >= m_correctObjects.size() || m_correctObjects[surface].objectClass == 0
+        || m_correctObjects[surface].objectClass > static_cast<uint32_t>(OBJECT_CLASS_COUNT)) {
+        return -1;
+    }
+    return static_cast<int>(m_correctObjects[surface].objectClass) - 1;
+}
+
+void CameraImage::setPredictedObjectIds(const std::vector<int> &ids)
+{
+    m_predictedObjectIds = ids;
 }
 
 const cv::Mat &CameraImage::getImage() const

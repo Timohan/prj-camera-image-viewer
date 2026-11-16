@@ -1,9 +1,13 @@
 #include "vision_transformer.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <stdexcept>
+#include <thread>
 #include "global_log.h"
 #include "pixel_label.h"
 
@@ -23,8 +27,9 @@
 // version 3 has the pixel head size (pixelHidden, pixelWindow), version 4 has the surface output flag,
 // version 5 has the refine step size (refineHidden, refineWindow), version 6 has the two distances flag,
 // version 7 has the cameras after the weight tensors, version 8 has the geo inputs (geoInputs),
-// version 9 has the object output flag (objectOutput)
-#define MODEL_FILE_VERSION  9
+// version 9 has the object output flag (objectOutput), version 10 has the joint model (cameraGroup, jointEvery) and the
+// object ids (objectIds)
+#define MODEL_FILE_VERSION  10
 // a model file cannot have more cameras than this
 #define MODEL_MAX_CAMERAS   1000
 
@@ -53,7 +58,7 @@ VisionTransformer::VisionTransformer(const Config &config, unsigned int seed) :
                                              : (config.skyOutput ? 2*m_patchOutputCount : m_patchOutputCount)),
     m_pixelInputCount(config.pixelWindow*config.pixelWindow*3),
     m_pixelOutputCount((config.skyOutput ? 2 : 1) + (config.surfaceOutput ? SURFACE_OUTPUT_COUNT : 0)
-                       + (config.objectOutput ? OBJECT_OUTPUT_COUNT : 0) + (config.twoDistances ? 2 : 0)),
+                       + config.objectValues() + (config.twoDistances ? 2 : 0)),
     m_refineInputCount(config.refineWindow*config.refineWindow*config.pixelHidden),
     m_pixelWeight(-1), m_pixelBias(-1), m_pixelOutWeight(-1), m_pixelOutBias(-1),
     m_refineWeight(-1), m_refineBias(-1), m_refineOutWeight(-1), m_refineOutBias(-1),
@@ -67,7 +72,9 @@ VisionTransformer::VisionTransformer(const Config &config, unsigned int seed) :
     m_patchWeight = addLinearWeight(m_patchInputCount, dimension, &random);
     m_patchBias = addParameter(dimension, 0.0f);
     // uniform -a..a has standard deviation a/sqrt(3)
-    m_position = addRandomParameter(m_tokenCount*dimension, POSITION_INIT_SCALE*std::sqrt(3.0f), &random);
+    // the joint model has the position embeddings of every camera one after another
+    m_position = addRandomParameter(std::max(1, config.cameraGroup)*m_tokenCount*dimension, POSITION_INIT_SCALE*std::sqrt(3.0f),
+                                    &random);
     for (int l=0;l<config.layers;l++) {
         LayerParameters layer;
         layer.norm1Gain = addParameter(dimension, 1.0f);
@@ -173,18 +180,103 @@ const float *VisionTransformer::value(int parameter) const
  * \param skyOutput if not nullptr and the network has the sky output, returns height x width sky logits
  * \param surfaceOutput if not nullptr and the network has the surface output, returns height x width x SURFACE_OUTPUT_COUNT
  * surface values (pixel_label.h)
- * \param objectOutput if not nullptr and the network has the object output, returns height x width x OBJECT_OUTPUT_COUNT
- * object values (pixel_label.h)
+ * \param objectOutput if not nullptr and the network has the object output, returns height x width x
+ * Config::objectValues() object values (pixel_label.h)
  */
 void VisionTransformer::forward(Workspace *workspace, const float *image, float *output, float *skyOutput,
                                 float *surfaceOutput, float *objectOutput) const
+{
+    if (m_config.cameraGroup > 1) {
+        throw std::logic_error("the joint model predicts the images of a scene together (forwardGroup())");
+    }
+    embedForward(workspace, image, 0);
+    for (int l=0;l<static_cast<int>(m_layerParameters.size());l++) {
+        blockStartForward(workspace, l);
+        attentionForward(&workspace->m_layers[static_cast<size_t>(l)]);
+        blockEndForward(workspace, l);
+    }
+    headForward(workspace, image, output, skyOutput, surfaceOutput, objectOutput);
+}
+
+/*!
+ * \brief VisionTransformer::forwardGroup
+ * forward of the images of one scene with the joint model (cameraGroup images, the cameras 1, 2, ... in this order),
+ * the joint blocks compare every token with the tokens of all images. Only for the prediction: the attention weights of
+ * the joint blocks are not kept (backward() cannot be used after this). Works also with cameraGroup 1 (every image alone).
+ * \param workspaces one workspace of every image
+ * \param images inputs of the images like forward()
+ * \param outputs outputs of every image like forward()
+ * \param threadCount CPU threads
+ */
+void VisionTransformer::forwardGroup(const std::vector<Workspace *> &workspaces, const std::vector<const float *> &images,
+                                     const GroupOutputs &outputs, int threadCount) const
+{
+    const int count = static_cast<int>(images.size());
+    if (static_cast<int>(workspaces.size()) != count || (m_config.cameraGroup > 1 && count != m_config.cameraGroup)) {
+        throw std::invalid_argument("forwardGroup needs " + std::to_string(m_config.cameraGroup) + " images and workspaces");
+    }
+    // runs function(item) for items 0..items-1 in the threads
+    auto parallel = [&](int items, const std::function<void(int)> &function) {
+        const int threads = std::max(1, std::min(threadCount, items));
+        std::atomic<int> next(0);
+        auto run = [&]() {
+            for (int item=next++;item<items;item=next++) {
+                function(item);
+            }
+        };
+        std::vector<std::thread> list;
+        for (int t=1;t<threads;t++) {
+            list.emplace_back(run);
+        }
+        run();
+        for (std::thread &thread : list) {
+            thread.join();
+        }
+    };
+    auto pointer = [](const std::vector<float *> &list, int i) {
+        return static_cast<size_t>(i) < list.size() ? list[static_cast<size_t>(i)] : nullptr;
+    };
+    const int heads = m_config.heads;
+    const int groupTokens = count*m_tokenCount;
+    parallel(count, [&](int i) {
+        embedForward(workspaces[static_cast<size_t>(i)], images[static_cast<size_t>(i)], m_config.cameraGroup > 1 ? i : 0);
+    });
+    for (int l=0;l<static_cast<int>(m_layerParameters.size());l++) {
+        parallel(count, [&](int i) {
+            blockStartForward(workspaces[static_cast<size_t>(i)], l);
+        });
+        if (m_config.jointLayer(l)) {
+            // every image and head is one item, the scores of one query are in its own row buffer
+            parallel(count*heads, [&](int item) {
+                std::vector<float> row(static_cast<size_t>(groupTokens));
+                groupAttentionForward(workspaces, l, item/heads, item%heads, row.data());
+            });
+        } else {
+            parallel(count, [&](int i) {
+                attentionForward(&workspaces[static_cast<size_t>(i)]->m_layers[static_cast<size_t>(l)]);
+            });
+        }
+        parallel(count, [&](int i) {
+            blockEndForward(workspaces[static_cast<size_t>(i)], l);
+        });
+    }
+    parallel(count, [&](int i) {
+        headForward(workspaces[static_cast<size_t>(i)], images[static_cast<size_t>(i)], pointer(outputs.output, i),
+                    pointer(outputs.skyOutput, i), pointer(outputs.surfaceOutput, i), pointer(outputs.objectOutput, i));
+    });
+}
+
+/*!
+ * \brief VisionTransformer::embedForward
+ * tokens of the image: linear(colors and geo inputs of the patch) + position embedding of the patch of the camera
+ * \param camera index of the camera in the scene (joint model), 0 for cameraGroup 1
+ */
+void VisionTransformer::embedForward(Workspace *workspace, const float *image, int camera) const
 {
     const int patchSize = m_config.patchSize;
     const int columns = m_config.width/patchSize;
     const int dimension = m_config.dimension;
     const int count = m_tokenCount;
-
-    // tokens: colors (and geo inputs) of the patches and their positions
     const int channels = m_config.inputChannels();
     for (int t=0;t<count;t++) {
         float *patch = workspace->m_patches.data() + t*m_patchInputCount;
@@ -197,39 +289,69 @@ void VisionTransformer::forward(Workspace *workspace, const float *image, float 
     }
     float *x = workspace->m_layers.empty() ? workspace->m_output.data() : workspace->m_layers[0].input.data();
     linearForward(workspace->m_patches.data(), count, m_patchInputCount, value(m_patchWeight), value(m_patchBias), dimension, x);
-    const float *position = value(m_position);
+    const float *position = value(m_position) + static_cast<size_t>(camera)*count*dimension;
     for (int i=0;i<count*dimension;i++) {
         x[i] += position[i];
     }
+}
 
-    for (size_t l=0;l<m_layerParameters.size();l++) {
-        const LayerParameters &parameters = m_layerParameters[l];
-        Workspace::Layer &layer = workspace->m_layers[l];
-        layerNormForward(layer.input.data(), count, dimension, value(parameters.norm1Gain), value(parameters.norm1Bias),
-                         layer.norm1.data(), layer.rstd1.data(), layer.y1.data());
-        linearForward(layer.y1.data(), count, dimension, value(parameters.qkvWeight), value(parameters.qkvBias),
-                      3*dimension, layer.qkv.data());
-        attentionForward(&layer);
-        linearForward(layer.attention.data(), count, dimension, value(parameters.outWeight), value(parameters.outBias),
-                      dimension, layer.x1.data());
-        for (int i=0;i<count*dimension;i++) {
-            layer.x1[static_cast<size_t>(i)] += layer.input[static_cast<size_t>(i)];
-        }
-        layerNormForward(layer.x1.data(), count, dimension, value(parameters.norm2Gain), value(parameters.norm2Bias),
-                         layer.norm2.data(), layer.rstd2.data(), layer.y2.data());
-        linearForward(layer.y2.data(), count, dimension, value(parameters.mlp1Weight), value(parameters.mlp1Bias),
-                      m_config.mlpDimension, layer.hidden.data());
-        for (size_t i=0;i<layer.hidden.size();i++) {
-            layer.activated[i] = gelu(layer.hidden[i]);
-        }
-        float *next = l + 1 < m_layerParameters.size() ? workspace->m_layers[l + 1].input.data() : workspace->m_output.data();
-        linearForward(layer.activated.data(), count, m_config.mlpDimension, value(parameters.mlp2Weight),
-                      value(parameters.mlp2Bias), dimension, next);
-        for (int i=0;i<count*dimension;i++) {
-            next[i] += layer.x1[static_cast<size_t>(i)];
-        }
+/*!
+ * \brief VisionTransformer::blockStartForward
+ * layer norm 1 and the queries, keys and values of the block l
+ */
+void VisionTransformer::blockStartForward(Workspace *workspace, int l) const
+{
+    const LayerParameters &parameters = m_layerParameters[static_cast<size_t>(l)];
+    Workspace::Layer &layer = workspace->m_layers[static_cast<size_t>(l)];
+    const int dimension = m_config.dimension;
+    layerNormForward(layer.input.data(), m_tokenCount, dimension, value(parameters.norm1Gain), value(parameters.norm1Bias),
+                     layer.norm1.data(), layer.rstd1.data(), layer.y1.data());
+    linearForward(layer.y1.data(), m_tokenCount, dimension, value(parameters.qkvWeight), value(parameters.qkvBias),
+                  3*dimension, layer.qkv.data());
+}
+
+/*!
+ * \brief VisionTransformer::blockEndForward
+ * output of the attention, the MLP and the residuals of the block l, the result is the input of the next block
+ */
+void VisionTransformer::blockEndForward(Workspace *workspace, int l) const
+{
+    const LayerParameters &parameters = m_layerParameters[static_cast<size_t>(l)];
+    Workspace::Layer &layer = workspace->m_layers[static_cast<size_t>(l)];
+    const int dimension = m_config.dimension;
+    const int count = m_tokenCount;
+    linearForward(layer.attention.data(), count, dimension, value(parameters.outWeight), value(parameters.outBias),
+                  dimension, layer.x1.data());
+    for (int i=0;i<count*dimension;i++) {
+        layer.x1[static_cast<size_t>(i)] += layer.input[static_cast<size_t>(i)];
     }
+    layerNormForward(layer.x1.data(), count, dimension, value(parameters.norm2Gain), value(parameters.norm2Bias),
+                     layer.norm2.data(), layer.rstd2.data(), layer.y2.data());
+    linearForward(layer.y2.data(), count, dimension, value(parameters.mlp1Weight), value(parameters.mlp1Bias),
+                  m_config.mlpDimension, layer.hidden.data());
+    for (size_t i=0;i<layer.hidden.size();i++) {
+        layer.activated[i] = gelu(layer.hidden[i]);
+    }
+    const size_t next = static_cast<size_t>(l) + 1;
+    float *out = next < m_layerParameters.size() ? workspace->m_layers[next].input.data() : workspace->m_output.data();
+    linearForward(layer.activated.data(), count, m_config.mlpDimension, value(parameters.mlp2Weight),
+                  value(parameters.mlp2Bias), dimension, out);
+    for (int i=0;i<count*dimension;i++) {
+        out[i] += layer.x1[static_cast<size_t>(i)];
+    }
+}
 
+/*!
+ * \brief VisionTransformer::headForward
+ * final layer norm, head (and pixel head, refine step) and the outputs of the pixels like forward()
+ */
+void VisionTransformer::headForward(Workspace *workspace, const float *image, float *output, float *skyOutput,
+                                    float *surfaceOutput, float *objectOutput) const
+{
+    const int patchSize = m_config.patchSize;
+    const int columns = m_config.width/patchSize;
+    const int dimension = m_config.dimension;
+    const int count = m_tokenCount;
     layerNormForward(workspace->m_output.data(), count, dimension, value(m_normFinalGain), value(m_normFinalBias),
                      workspace->m_normFinal.data(), workspace->m_rstdFinal.data(), workspace->m_yFinal.data());
     linearForward(workspace->m_yFinal.data(), count, dimension, value(m_headWeight), value(m_headBias),
@@ -271,8 +393,10 @@ void VisionTransformer::forward(Workspace *workspace, const float *image, float 
             const size_t pixel = static_cast<size_t>(top + k/patchSize)*static_cast<size_t>(m_config.width)
                                  + static_cast<size_t>(left + k%patchSize);
             const float *values = headValues(workspace->m_head, workspace->m_pixelOutput, t, k);
-            output[pixel] = m_config.twoDistances ? chosenDistance(values[0], values[m_pixelOutputCount - 2],
-                                                                   values[m_pixelOutputCount - 1]) : values[0];
+            if (output) {
+                output[pixel] = m_config.twoDistances ? chosenDistance(values[0], values[m_pixelOutputCount - 2],
+                                                                       values[m_pixelOutputCount - 1]) : values[0];
+            }
             if (sky) {
                 skyOutput[pixel] = values[skyOffset()];
             }
@@ -280,7 +404,8 @@ void VisionTransformer::forward(Workspace *workspace, const float *image, float 
                 std::copy_n(values + m_surfaceOffset, SURFACE_OUTPUT_COUNT, surfaceOutput + pixel*SURFACE_OUTPUT_COUNT);
             }
             if (object) {
-                std::copy_n(values + m_objectOffset, OBJECT_OUTPUT_COUNT, objectOutput + pixel*OBJECT_OUTPUT_COUNT);
+                std::copy_n(values + m_objectOffset, m_config.objectValues(),
+                            objectOutput + pixel*static_cast<size_t>(m_config.objectValues()));
             }
         }
     }
@@ -442,6 +567,9 @@ double VisionTransformer::backward(Workspace *workspace, const float *target, co
                                    const float *normals, const int32_t *surfaces, double *surfaceLoss,
                                    const float *objectTable, double *objectLoss) const
 {
+    if (m_config.cameraGroup > 1 || m_config.objectIds) {
+        throw std::logic_error("the joint model and the object ids are trained on the GPU");
+    }
     const int patchSize = m_config.patchSize;
     const int columns = m_config.width/patchSize;
     const int dimension = m_config.dimension;
@@ -834,6 +962,59 @@ void VisionTransformer::attentionForward(Workspace::Layer *layer) const
 }
 
 /*!
+ * \brief VisionTransformer::groupAttentionForward
+ * attention of the joint block l of one head of one image: the query of every token of the image is compared with the
+ * keys of the tokens of all images of the scene, the weights are not kept (only for the prediction)
+ * \param workspaces workspaces of the images of the scene after blockStartForward()
+ * \param image index of the image whose attention result is made
+ * \param row buffer of tokens*images scores
+ */
+void VisionTransformer::groupAttentionForward(const std::vector<Workspace *> &workspaces, int l, int image, int head,
+                                              float *row) const
+{
+    const int count = m_tokenCount;
+    const int images = static_cast<int>(workspaces.size());
+    const int dimension = m_config.dimension;
+    const int headDimension = dimension/m_config.heads;
+    const float scale = 1.0f/std::sqrt(static_cast<float>(headDimension));
+    Workspace::Layer &layer = workspaces[static_cast<size_t>(image)]->m_layers[static_cast<size_t>(l)];
+    for (int i=0;i<count;i++) {
+        const float *query = layer.qkv.data() + i*3*dimension + head*headDimension;
+        float maxScore = -INFINITY;
+        for (int b=0;b<images;b++) {
+            const float *qkv = workspaces[static_cast<size_t>(b)]->m_layers[static_cast<size_t>(l)].qkv.data();
+            for (int j=0;j<count;j++) {
+                const float *key = qkv + j*3*dimension + dimension + head*headDimension;
+                float score = 0.0f;
+                for (int d=0;d<headDimension;d++) {
+                    score += query[d]*key[d];
+                }
+                score *= scale;
+                row[b*count + j] = score;
+                maxScore = std::max(maxScore, score);
+            }
+        }
+        float sum = 0.0f;
+        for (int j=0;j<images*count;j++) {
+            row[j] = std::exp(row[j] - maxScore);
+            sum += row[j];
+        }
+        float *out = layer.attention.data() + i*dimension + head*headDimension;
+        std::fill(out, out + headDimension, 0.0f);
+        for (int b=0;b<images;b++) {
+            const float *qkv = workspaces[static_cast<size_t>(b)]->m_layers[static_cast<size_t>(l)].qkv.data();
+            for (int j=0;j<count;j++) {
+                const float probability = row[b*count + j]/sum;
+                const float *valueVector = qkv + j*3*dimension + 2*dimension + head*headDimension;
+                for (int d=0;d<headDimension;d++) {
+                    out[d] += probability*valueVector[d];
+                }
+            }
+        }
+    }
+}
+
+/*!
  * \brief VisionTransformer::attentionBackward
  * sets the gradient of queries, keys and values from the gradient of the attention result
  */
@@ -967,11 +1148,12 @@ const std::vector<VisionTransformer::Camera> &VisionTransformer::getCameras() co
 /*!
  * \brief VisionTransformer::save
  * saves the network to a binary file (native byte order, little-endian on x86):
- * char[4] "VITM", uint32_t version (9), int32_t width, height, patchSize, dimension, heads, layers, mlpDimension,
+ * char[4] "VITM", uint32_t version (10), int32_t width, height, patchSize, dimension, heads, layers, mlpDimension,
  * skyOutput (0 or 1, missing in version 1 files), pixelHidden, pixelWindow (missing in version 1 and 2 files),
  * surfaceOutput (0 or 1, missing in version 1-3 files), refineHidden, refineWindow (missing in version 1-4 files),
  * twoDistances (0 or 1, missing in version 1-5 files), geoInputs (missing in version 1-7 files),
- * objectOutput (0 or 1, missing in version 1-8 files),
+ * objectOutput (0 or 1, missing in version 1-8 files), cameraGroup, jointEvery, objectIds (0 or 1)
+ * (missing in version 1-9 files),
  * float targetMean, targetScale (distance = exp(output*targetScale + targetMean) meters),
  * uint32_t count of the weight tensors, then for every tensor uint32_t count of the values and the float values,
  * uint32_t count of the cameras (missing in version 1-6 files), then for every camera uint32_t number, width, height,
@@ -1014,6 +1196,9 @@ bool VisionTransformer::save(const std::string &filename, float targetMean, floa
         writeInt32(m_config.twoDistances ? 1 : 0);
         writeInt32(m_config.geoInputs);
         writeInt32(m_config.objectOutput ? 1 : 0);
+        writeInt32(m_config.cameraGroup);
+        writeInt32(m_config.jointEvery);
+        writeInt32(m_config.objectIds ? 1 : 0);
         writeFloat(targetMean);
         writeFloat(targetScale);
         writeUint32(static_cast<uint32_t>(m_parameters.size()));
@@ -1119,6 +1304,14 @@ std::unique_ptr<VisionTransformer> VisionTransformer::load(const std::string &fi
         file.read(reinterpret_cast<char *>(&objectOutput), sizeof(objectOutput));
         config.objectOutput = objectOutput != 0;
     }
+    // versions 1-9 predict every image alone
+    if (version >= 10) {
+        int32_t joint[3] = { 1, 1, 0 };
+        file.read(reinterpret_cast<char *>(joint), sizeof(joint));
+        config.cameraGroup = joint[0];
+        config.jointEvery = joint[1];
+        config.objectIds = joint[2] != 0;
+    }
     file.read(reinterpret_cast<char *>(targetMean), sizeof(*targetMean));
     file.read(reinterpret_cast<char *>(targetScale), sizeof(*targetScale));
     file.read(reinterpret_cast<char *>(&tensorCount), sizeof(tensorCount));
@@ -1134,7 +1327,9 @@ std::unique_ptr<VisionTransformer> VisionTransformer::load(const std::string &fi
         || (config.refineHidden > 0 && (config.pixelHidden <= 0 || config.refineWindow <= 0 || config.refineWindow%2 == 0))
         || (config.twoDistances && (config.pixelHidden <= 0 || !config.skyOutput))
         || (config.geoInputs != 0 && config.geoInputs != GEO_INPUT_COUNT)
-        || (config.objectOutput && !config.surfaceOutput)) {
+        || (config.objectOutput && !config.surfaceOutput)
+        || config.cameraGroup < 1 || config.cameraGroup > static_cast<int>(MODEL_MAX_CAMERAS) || config.jointEvery < 1
+        || (config.objectIds && !config.objectOutput)) {
         TG_ERROR_LOG(filename, "has an invalid network size");
         return nullptr;
     }

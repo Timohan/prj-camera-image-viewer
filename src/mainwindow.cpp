@@ -7,7 +7,7 @@
 #define PIXEL_LABEL_WIDTH           500
 #define DISTANCES_LABEL_WIDTH       260
 #define FILL_LABEL_WIDTH            220
-#define OBJECTS_LABEL_WIDTH         200
+#define OBJECTS_LABEL_WIDTH         250
 #define OBJECT_LABEL_WIDTH          1220
 #define LABEL_BACKGROUND_COLOR      30, 80, 200, 255
 #define LABEL_TEXT_COLOR            255, 255, 255
@@ -125,7 +125,9 @@ void MainWindow::updateDistancesText()
 
 void MainWindow::updateObjectsText()
 {
-    m_objectsText.setText(m_viewerScene->getShowObjects() ? "Objects: on" : "Objects: off");
+    const CameraImage::ObjectsMode mode = m_viewerScene->getObjectsMode();
+    m_objectsText.setText(mode == CameraImage::ObjectsClasses ? "Objects: classes"
+                          : mode == CameraImage::ObjectsIds ? "Objects: each object" : "Objects: off");
 }
 
 void MainWindow::updateFillText()

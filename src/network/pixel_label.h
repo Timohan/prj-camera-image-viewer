@@ -231,9 +231,28 @@ PIXEL_LABEL_FUNCTION float twoDistanceLoss(float near, float gap, float choice, 
 #define OBJECT_SIZE             (OBJECT_HEADING + 2)
 #define OBJECT_OUTPUT_COUNT     (OBJECT_SIZE + 3)
 #define OBJECT_CENTER_SCALE     10.0f
+// with the object ids (VisionTransformer::Config::objectIds) every pixel has more object outputs after them: of a car
+// or a person the center of its box in the world (x, y, z, in OBJECT_CENTER_SCALE m) and its heading in the world (cos
+// and sin of the yaw of the objects file, 0 is +z, positive toward +x), the same for all cameras that see the object,
+// then OBJECT_ID_SIZE values of the id of the object (of every object that is not the ground, also the cubes, balls,
+// cylinders and cones): the pixels of the same object have near ids in all cameras of a scene and the means of the
+// ids of different objects are far from each other (objectIdLoss of the training, not a loss of one pixel)
+#define OBJECT_WORLD_CENTER     OBJECT_OUTPUT_COUNT
+#define OBJECT_WORLD_HEADING    (OBJECT_WORLD_CENTER + 3)
+#define OBJECT_ID               (OBJECT_WORLD_HEADING + 2)
+#define OBJECT_ID_SIZE          8
+#define OBJECT_ID_OUTPUT_COUNT  (OBJECT_ID + OBJECT_ID_SIZE)
+// count of the object outputs of a pixel
+PIXEL_LABEL_FUNCTION int objectOutputCount(bool objectIds)
+{
+    return objectIds ? OBJECT_ID_OUTPUT_COUNT : OBJECT_OUTPUT_COUNT;
+}
 // object target of every surface number of an image (ImageSamples::getObjectTable()): class (-1: no target, also
-// the sky), center x/y/z, heading cos/sin, logarithms of the sizes x/y/z, like the outputs
-#define OBJECT_TABLE_VALUES     9
+// the sky), center x/y/z, heading cos/sin, logarithms of the sizes x/y/z, like the outputs, then the world center x/y/z
+// (in OBJECT_CENTER_SCALE m), world heading cos/sin and 1 if the world values are targets (0 in a mirrored image)
+#define OBJECT_TABLE_VALUES     15
+#define OBJECT_TABLE_WORLD      9
+#define OBJECT_TABLE_WORLD_VALID 14
 #define OBJECT_TABLE_SIZE       256     // surface numbers of an image that have targets, larger ones have none
 // cross-entropy of the class, Huber loss of the center and squared errors of the heading and the sizes are
 // multiplied by these before they are added to the distance loss
@@ -242,6 +261,12 @@ PIXEL_LABEL_FUNCTION float twoDistanceLoss(float near, float gap, float choice, 
 #define OBJECT_HEADING_LOSS_WEIGHT  0.05f
 #define OBJECT_SIZE_LOSS_WEIGHT     0.1f
 #define OBJECT_CENTER_DELTA         0.1f    // Huber delta of the center, 0.1 is 1 m
+// loss of the ids (objectIdLoss): the ids of a pixel are pulled to the mean of its object if they are farther than
+// OBJECT_ID_PULL_MARGIN, the means of two objects of a scene are pushed apart if they are nearer than
+// 2*OBJECT_ID_PUSH_MARGIN, every pixel has the loss of its pull and of the pushes of its object
+#define OBJECT_ID_LOSS_WEIGHT       0.1f
+#define OBJECT_ID_PULL_MARGIN       0.5f
+#define OBJECT_ID_PUSH_MARGIN       1.5f
 
 /*!
  * \brief objectTarget
@@ -263,15 +288,18 @@ PIXEL_LABEL_FUNCTION const float *objectTarget(uint8_t label, int32_t surface, c
  * \brief objectPixelLoss
  * OBJECT_CLASS_LOSS_WEIGHT*cross-entropy of the class logits and of a car or a person also
  * OBJECT_CENTER_LOSS_WEIGHT*Huber loss of the center + OBJECT_HEADING_LOSS_WEIGHT*squared error of the heading
- * + OBJECT_SIZE_LOSS_WEIGHT*squared error of the sizes
- * \param values OBJECT_OUTPUT_COUNT outputs of the pixel
+ * + OBJECT_SIZE_LOSS_WEIGHT*squared error of the sizes, with the object ids also of the world center and heading
+ * (OBJECT_CENTER_LOSS_WEIGHT, OBJECT_HEADING_LOSS_WEIGHT) if they are targets; the ids have no loss here (objectIdLoss
+ * of the training sees all pixels of the scene)
+ * \param values objectOutputCount(objectIds) outputs of the pixel
  * \param target objectTarget() of the pixel, nullptr: nothing is learned
- * \param gradient returns OBJECT_OUTPUT_COUNT derivatives of the loss
+ * \param gradient returns objectOutputCount(objectIds) derivatives of the loss
+ * \param objectIds true: the outputs have the world box and the ids
  * \return loss
  */
-PIXEL_LABEL_FUNCTION float objectPixelLoss(const float *values, const float *target, float *gradient)
+PIXEL_LABEL_FUNCTION float objectPixelLoss(const float *values, const float *target, float *gradient, bool objectIds = false)
 {
-    for (int i=0;i<OBJECT_OUTPUT_COUNT;i++) {
+    for (int i=0;i<objectOutputCount(objectIds);i++) {
         gradient[i] = 0.0f;
     }
     if (!target) {
@@ -308,6 +336,19 @@ PIXEL_LABEL_FUNCTION float objectPixelLoss(const float *values, const float *tar
         const float error = values[OBJECT_SIZE + i] - target[6 + i];
         loss += OBJECT_SIZE_LOSS_WEIGHT*error*error;
         gradient[OBJECT_SIZE + i] = OBJECT_SIZE_LOSS_WEIGHT*2.0f*error;
+    }
+    if (objectIds && target[OBJECT_TABLE_WORLD_VALID] > 0.5f) {
+        for (int i=0;i<3;i++) {
+            float g;
+            loss += OBJECT_CENTER_LOSS_WEIGHT*distanceLoss(values[OBJECT_WORLD_CENTER + i] - target[OBJECT_TABLE_WORLD + i],
+                                                           OBJECT_CENTER_DELTA, &g);
+            gradient[OBJECT_WORLD_CENTER + i] = OBJECT_CENTER_LOSS_WEIGHT*g;
+        }
+        for (int i=0;i<2;i++) {
+            const float error = values[OBJECT_WORLD_HEADING + i] - target[OBJECT_TABLE_WORLD + 3 + i];
+            loss += OBJECT_HEADING_LOSS_WEIGHT*error*error;
+            gradient[OBJECT_WORLD_HEADING + i] = OBJECT_HEADING_LOSS_WEIGHT*2.0f*error;
+        }
     }
     return loss;
 }

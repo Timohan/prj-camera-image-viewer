@@ -19,6 +19,10 @@
  * behind the edge (fill meshes of CameraImage).
  * Objects: the images can be tinted by the classes of the objects of their pixels (predicted by a model with the object
  * output, or the correct ones of the data files with the correct distances), and the picked pixel shows its object.
+ * A model with the object ids gives every pixel the id of its object: the pixels of all images whose ids are near
+ * each other are one object (clusterObjects()), so an object that many cameras see is one object, its box is the mean
+ * of the world boxes of its pixels. The images can be tinted by the objects (every object in its own color, the
+ * correct objects are the surface numbers of the data files).
  */
 class ViewerScene
 {
@@ -39,8 +43,9 @@ public:
     void toggleFillGaps();
     bool getFillGaps() const;
     void toggleObjects();
-    bool getShowObjects() const;
+    CameraImage::ObjectsMode getObjectsMode() const;
     bool hasObjects() const;
+    bool hasObjectIds() const;
     void startTurn(int direction);
     void stopTurn(int direction);
     void startPitch(int direction);
@@ -53,7 +58,26 @@ private:
     std::vector<std::unique_ptr<CameraImage>> m_listCameraImage;
     bool m_correctDistances;    // true: correct distances, false: predicted distances
     bool m_fillGaps;            // black areas are filled with the fill meshes
-    bool m_showObjects;         // images are tinted by the classes of the objects
+    CameraImage::ObjectsMode m_objectsMode;  // images are tinted by the classes or the ids of the objects
+    // predicted object of the ids (clusterObjects()): the cameras that see it (bit 0 is camera 1), its pixels, the
+    // sums of the world boxes of its pixels and the pixels of every predicted class
+    struct ObjectGroup {
+        uint32_t cameras = 0;
+        uint32_t cameraPixels[32] = {};
+        size_t pixels = 0;
+        double center[3] = { 0.0, 0.0, 0.0 };
+        double heading[2] = { 0.0, 0.0 };
+        double logSize[3] = { 0.0, 0.0, 0.0 };
+        double probability = 0.0;
+        size_t classPixels[OBJECT_CLASS_COUNT] = {};
+    };
+    std::vector<ObjectGroup> m_objectGroups;
+    bool m_objectIds;           // the model has the object ids
+    // cameras that see at least OBJECT_GROUP_MIN_PIXELS pixels of the correct objects (surface numbers)
+    std::vector<uint32_t> m_correctObjectCameras;
+
+    void clusterObjects();
+    static std::string cameraList(uint32_t cameras);
     VECTOR3 m_position;         // view camera, opengl units
     float m_yaw;                // radians, 0 looks to +z, positive turns to +x
     float m_pitch;              // radians, positive looks up

@@ -40,6 +40,17 @@ public:
         float center[3] = { 0.0f, 0.0f, 0.0f };     // center of the box in the camera (x right, y down, z forward), m
         float heading[2] = { 1.0f, 0.0f };          // cos and sin of the angle from the forward of the camera to the front
         float size[3] = { 0.0f, 0.0f, 0.0f };       // width, height and length of the box, m
+        // with the object ids of the model (Config::objectIds): the box in the world and the id of the object
+        bool hasId = false;
+        float worldCenter[3] = { 0.0f, 0.0f, 0.0f };    // center of the box in the world, m
+        float worldHeading[2] = { 1.0f, 0.0f };         // cos and sin of the yaw in the world
+        float id[OBJECT_ID_SIZE] = {};
+    };
+    // tint of the images: none, the classes of the objects, every object (id) in its own color
+    enum ObjectsMode {
+        ObjectsOff = 0,
+        ObjectsClasses,
+        ObjectsIds
     };
     static const uint8_t NO_OBJECT = 255;
 
@@ -55,10 +66,22 @@ public:
     void setPrediction(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
                        const std::vector<uint8_t> &connections, const std::vector<ObjectPixel> &objects);
     int createMeshes(GLint vertexAttribute, GLint textureCoordinateAttribute);
-    // objects: the image is tinted by the classes of the objects (correct or predicted ones like the distances)
-    void render(bool correctDistances, bool fillMesh = false, bool objects = false) const;
+    // objectsMode: the image is tinted by the classes or the ids of the objects (correct or predicted ones like the
+    // distances)
+    void render(bool correctDistances, bool fillMesh = false, ObjectsMode objectsMode = ObjectsOff) const;
     std::string getDistanceText(int x, int y, bool correctDistances, const VECTOR3 &point) const;
     std::string getObjectText(int x, int y, bool correctObjects) const;
+    // object of the pixel for the object ids: the surface number of the data file (correct) or the predicted object
+    // (setPredictedObjectIds()), -1: none
+    int getObjectId(int x, int y, bool correctObjects) const;
+    const std::vector<ObjectPixel> &getPredictedObjects() const;
+    const std::vector<uint32_t> &getCorrectSurfaces() const;
+    // class of the model of the correct object of the surface, -1: no object (sky, ground or not known)
+    int getCorrectClass(uint32_t surface) const;
+    // predicted object of every pixel (-1: none), made by ViewerScene from the ids of all images
+    void setPredictedObjectIds(const std::vector<int> &ids);
+    // "<class> (<probability>%), <sizes>, <distance from the camera> away, heading <yaw> degrees" of a box in the world
+    std::string objectText(int objectClass, int probability, const double *center, const double *size, double yaw) const;
 
     const cv::Mat &getImage() const;
     int getCameraNumber() const;
@@ -96,6 +119,9 @@ private:
     GLuint m_texture;
     GLuint m_correctObjectTexture;          // image tinted by the classes, 0 if the objects are not known
     GLuint m_predictedObjectTexture;
+    GLuint m_correctIdTexture;              // image tinted by the objects, 0 if they are not known
+    GLuint m_predictedIdTexture;
+    std::vector<int> m_predictedObjectIds;  // predicted object of every pixel, empty without the object ids
     Mesh m_correctMesh;
     Mesh m_predictedMesh;
     Mesh m_correctFillMesh;
@@ -110,8 +136,7 @@ private:
                            Mesh *mesh);
     static void deleteMesh(Mesh *mesh);
     GLuint createTexture(const cv::Mat &image) const;
-    cv::Mat tintImage(bool correctObjects) const;
-    std::string objectText(int objectClass, int probability, const double *center, const double *size, double yaw) const;
+    cv::Mat tintImage(bool correctObjects, bool ids) const;
 };
 
 #endif // CAMERA_IMAGE_H

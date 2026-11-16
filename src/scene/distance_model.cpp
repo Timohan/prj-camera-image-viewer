@@ -1,6 +1,8 @@
 #include "distance_model.h"
 #include <algorithm>
 #include <chrono>
+#include <functional>
+#include <memory>
 #include <cmath>
 #include <thread>
 #include "global_log.h"
@@ -40,7 +42,8 @@ bool DistanceModel::load(const std::string &filename)
                  m_network->getParameterCount(), "weights,",
                  config.surfaceOutput ? "edges of the surfaces from the model" : "edges from the distance jumps",
                  config.geoInputs > 0 ? ", distances also from the other cameras (matching)" : "",
-                 config.objectOutput ? ", objects of the pixels (cars and people)" : "");
+                 config.objectOutput ? ", objects of the pixels (cars and people)" : "",
+                 config.cameraGroup > 1 ? ", joint model of " + std::to_string(config.cameraGroup) + " cameras" : std::string());
     return true;
 }
 
@@ -51,6 +54,15 @@ bool DistanceModel::load(const std::string &filename)
 bool DistanceModel::hasObjectOutput() const
 {
     return m_network && m_network->getConfig().objectOutput;
+}
+
+/*!
+ * \brief DistanceModel::hasObjectIds
+ * \return true if the model predicts also the world boxes and the ids of the objects
+ */
+bool DistanceModel::hasObjectIds() const
+{
+    return m_network && m_network->getConfig().objectIds;
 }
 
 /*!
@@ -66,7 +78,8 @@ const std::vector<VisionTransformer::Camera> &DistanceModel::getCameras() const
  * \brief DistanceModel::predict
  * predicts the distances of the images, every image in its own thread. A model with the geo inputs gets also the
  * distances from the other cameras: the images are matched first like in the training (StereoMatcher, .geo files of
- * the learner), with the cameras of the model.
+ * the learner), with the cameras of the model. The joint model (cameraGroup > 1) predicts the images of all cameras at
+ * once (VisionTransformer::forwardGroup()), the images must be the cameras 1, 2, ... of the model.
  * \param images RGB images of the cameras 1, 2, ... of the model, they must fit into the image size of the model
  * \return distance (mm), sky and connections of every pixel of every image, empty lists for an image that does not fit
  */
@@ -106,19 +119,36 @@ std::vector<DistanceModel::Prediction> DistanceModel::predict(const std::vector<
         }
         TG_DEBUG_LOG("Cameras matched in", std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), "s");
     }
-    auto predictImage = [&](size_t index) {
-        const cv::Mat &image = *images[index];
-        if (image.cols > config.width || image.rows > config.height) {
-            TG_ERROR_LOG("Image is", std::to_string(image.cols) + "x" + std::to_string(image.rows),
+    for (const cv::Mat *image : images) {
+        if (image->cols > config.width || image->rows > config.height) {
+            TG_ERROR_LOG("Image is", std::to_string(image->cols) + "x" + std::to_string(image->rows),
                          "but the model is for", std::to_string(config.width) + "x" + std::to_string(config.height));
-            return;
+            return result;
         }
+    }
+    // the joint model predicts the images of all cameras of the scene together
+    const bool joint = config.cameraGroup > 1;
+    if (joint && images.size() != static_cast<size_t>(config.cameraGroup)) {
+        TG_ERROR_LOG("The model sees", config.cameraGroup, "cameras at once, but the scene has", images.size(), "images");
+        return result;
+    }
+    // network inputs and outputs of every image
+    const size_t pixels = static_cast<size_t>(config.width)*config.height;
+    const int channels = config.inputChannels();
+    struct Buffers {
+        std::vector<float> input, output, skyOutput, surfaceOutput, objectOutput;
+    };
+    std::vector<Buffers> buffers(images.size());
+    auto prepareImage = [&](size_t index) {
+        const cv::Mat &image = *images[index];
         // image is padded with 0 on the right and bottom to the size of the model
-        const size_t pixels = static_cast<size_t>(config.width)*config.height;
-        const int channels = config.inputChannels();
-        std::vector<float> input(pixels*channels, 0.0f), output(pixels), skyOutput(pixels);
-        std::vector<float> surfaceOutput(config.surfaceOutput ? pixels*SURFACE_OUTPUT_COUNT : 0);
-        std::vector<float> objectOutput(config.objectOutput ? pixels*OBJECT_OUTPUT_COUNT : 0);
+        Buffers &buffer = buffers[index];
+        buffer.input.assign(pixels*channels, 0.0f);
+        buffer.output.assign(pixels, 0.0f);
+        buffer.skyOutput.assign(pixels, 0.0f);
+        buffer.surfaceOutput.assign(config.surfaceOutput ? pixels*SURFACE_OUTPUT_COUNT : 0, 0.0f);
+        buffer.objectOutput.assign(pixels*static_cast<size_t>(config.objectValues()), 0.0f);
+        std::vector<float> &input = buffer.input;
         for (int y=0;y<image.rows;y++) {
             const cv::Vec3b *row = image.ptr<cv::Vec3b>(y);
             for (int x=0;x<image.cols;x++) {
@@ -135,10 +165,13 @@ std::vector<DistanceModel::Prediction> DistanceModel::predict(const std::vector<
                 }
             }
         }
-        VisionTransformer::Workspace workspace(*m_network);
-        m_network->forward(&workspace, input.data(), output.data(), skyOutput.data(),
-                           config.surfaceOutput ? surfaceOutput.data() : nullptr,
-                           config.objectOutput ? objectOutput.data() : nullptr);
+    };
+    auto convertImage = [&](size_t index) {
+        const cv::Mat &image = *images[index];
+        const std::vector<float> &output = buffers[index].output;
+        const std::vector<float> &skyOutput = buffers[index].skyOutput;
+        const std::vector<float> &surfaceOutput = buffers[index].surfaceOutput;
+        const std::vector<float> &objectOutput = buffers[index].objectOutput;
         Prediction &prediction = result[index];
         prediction.distances.resize(static_cast<size_t>(image.cols)*image.rows);
         prediction.sky.resize(prediction.distances.size());
@@ -159,7 +192,7 @@ std::vector<DistanceModel::Prediction> DistanceModel::predict(const std::vector<
                 }
                 if (config.objectOutput && !prediction.sky[pixel]) {
                     // class of the largest logit and its softmax probability, the box values like ImageSamples::getObjectTable()
-                    const float *values = objectOutput.data() + source*OBJECT_OUTPUT_COUNT;
+                    const float *values = objectOutput.data() + source*static_cast<size_t>(config.objectValues());
                     const int best = static_cast<int>(std::max_element(values, values + OBJECT_CLASS_COUNT) - values);
                     double sum = 0.0;
                     for (int c=0;c<OBJECT_CLASS_COUNT;c++) {
@@ -175,16 +208,61 @@ std::vector<DistanceModel::Prediction> DistanceModel::predict(const std::vector<
                     const float length = std::hypot(values[OBJECT_HEADING], values[OBJECT_HEADING + 1]);
                     object.heading[0] = length > 0.0f ? values[OBJECT_HEADING]/length : 1.0f;
                     object.heading[1] = length > 0.0f ? values[OBJECT_HEADING + 1]/length : 0.0f;
+                    if (config.objectIds) {
+                        object.hasId = true;
+                        for (int k=0;k<3;k++) {
+                            object.worldCenter[k] = values[OBJECT_WORLD_CENTER + k]*OBJECT_CENTER_SCALE;
+                        }
+                        const float worldLength = std::hypot(values[OBJECT_WORLD_HEADING], values[OBJECT_WORLD_HEADING + 1]);
+                        object.worldHeading[0] = worldLength > 0.0f ? values[OBJECT_WORLD_HEADING]/worldLength : 1.0f;
+                        object.worldHeading[1] = worldLength > 0.0f ? values[OBJECT_WORLD_HEADING + 1]/worldLength : 0.0f;
+                        std::copy_n(values + OBJECT_ID, OBJECT_ID_SIZE, object.id);
+                    }
                 }
             }
         }
     };
-    std::vector<std::thread> threads;
-    for (size_t i=0;i<images.size();i++) {
-        threads.emplace_back(predictImage, i);
+    auto runThreads = [&](const std::function<void(size_t)> &function) {
+        std::vector<std::thread> threads;
+        for (size_t i=0;i<images.size();i++) {
+            threads.emplace_back(function, i);
+        }
+        for (std::thread &thread : threads) {
+            thread.join();
+        }
+    };
+    if (joint) {
+        // the joint blocks of the model compare the tokens of all images, forwardGroup() uses all CPU threads
+        runThreads(prepareImage);
+        std::vector<std::unique_ptr<VisionTransformer::Workspace>> workspaceList;
+        std::vector<VisionTransformer::Workspace *> workspaces;
+        std::vector<const float *> inputs;
+        VisionTransformer::GroupOutputs outputs;
+        for (Buffers &buffer : buffers) {
+            workspaceList.push_back(std::make_unique<VisionTransformer::Workspace>(*m_network));
+            workspaces.push_back(workspaceList.back().get());
+            inputs.push_back(buffer.input.data());
+            outputs.output.push_back(buffer.output.data());
+            outputs.skyOutput.push_back(buffer.skyOutput.data());
+            outputs.surfaceOutput.push_back(config.surfaceOutput ? buffer.surfaceOutput.data() : nullptr);
+            outputs.objectOutput.push_back(config.objectOutput ? buffer.objectOutput.data() : nullptr);
+        }
+        m_network->forwardGroup(workspaces, inputs, outputs,
+                                static_cast<int>(std::max(1u, std::thread::hardware_concurrency())));
+        runThreads(convertImage);
+        return result;
     }
-    for (std::thread &thread : threads) {
-        thread.join();
-    }
+    // every image alone, every image in its own thread
+    runThreads([&](size_t index) {
+        prepareImage(index);
+        Buffers &buffer = buffers[index];
+        VisionTransformer::Workspace workspace(*m_network);
+        m_network->forward(&workspace, buffer.input.data(), buffer.output.data(), buffer.skyOutput.data(),
+                           config.surfaceOutput ? buffer.surfaceOutput.data() : nullptr,
+                           config.objectOutput ? buffer.objectOutput.data() : nullptr);
+        convertImage(index);
+        // the buffers of the image are not needed anymore
+        buffer = Buffers();
+    });
     return result;
 }
