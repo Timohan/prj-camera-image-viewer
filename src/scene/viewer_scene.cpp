@@ -20,6 +20,7 @@
 ViewerScene::ViewerScene() :
     m_correctDistances(false),
     m_fillGaps(false),
+    m_showObjects(false),
     m_position({ 0.0f, 1.0f, 0.0f }),
     m_yaw(0.0f),
     m_pitch(0.0f),
@@ -105,7 +106,8 @@ bool ViewerScene::load(const std::string &imageDirectory, const std::string &sce
         if (predictions[i].distances.empty()) {
             return false;
         }
-        m_listCameraImage[i]->setPrediction(predictions[i].distances, predictions[i].sky, predictions[i].connections);
+        m_listCameraImage[i]->setPrediction(predictions[i].distances, predictions[i].sky, predictions[i].connections,
+                                            predictions[i].objects);
     }
     moveToCamera(0);
     return true;
@@ -184,14 +186,14 @@ void ViewerScene::render(float width, float height)
         glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
     }
     for (const auto &image : m_listCameraImage) {
-        image->render(m_correctDistances);
+        image->render(m_correctDistances, false, m_showObjects);
     }
     if (m_fillGaps) {
         // fill meshes only on the pixels that no mesh has drawn (black areas), so they never hide a real surface
         glStencilFunc(GL_EQUAL, 0, 0xFF);
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         for (const auto &image : m_listCameraImage) {
-            image->render(m_correctDistances, true);
+            image->render(m_correctDistances, true, m_showObjects);
         }
         glDisable(GL_STENCIL_TEST);
     }
@@ -363,6 +365,24 @@ std::string ViewerScene::getPickedText() const
 }
 
 /*!
+ * \brief ViewerScene::getPickedObjectText
+ * \return "Object: <object>" of the picked pixel (CameraImage::getObjectText()), the correct object of the data file
+ * with the correct distances, the predicted one with the predicted distances, empty before the first pick
+ */
+std::string ViewerScene::getPickedObjectText() const
+{
+    if (!m_pickDone) {
+        return "";
+    }
+    if (m_pickedImage < 0) {
+        return "Object: N/A";
+    }
+    const CameraImage &image = *m_listCameraImage[static_cast<size_t>(m_pickedImage)];
+    return (m_correctDistances ? "Correct object: " : "Predicted object: ")
+        + image.getObjectText(m_pickedPixelX, m_pickedPixelY, m_correctDistances);
+}
+
+/*!
  * \brief ViewerScene::moveToCamera
  * \param index 0: middle of the cameras looking to +z, 1-n: place and direction of camera 1-n
  */
@@ -416,6 +436,44 @@ void ViewerScene::toggleFillGaps()
 {
     m_fillGaps = !m_fillGaps;
     TG_DEBUG_LOG(m_fillGaps ? "Black areas are filled" : "Black areas are not filled");
+}
+
+/*!
+ * \brief ViewerScene::toggleObjects
+ * changes between the images and the images tinted by the classes of the objects
+ */
+void ViewerScene::toggleObjects()
+{
+    if (!hasObjects()) {
+        TG_DEBUG_LOG("The model has no object output and the data files have no objects");
+        return;
+    }
+    m_showObjects = !m_showObjects;
+    TG_DEBUG_LOG(m_showObjects ? "Objects are shown (other object blue, sedan yellow, SUV orange, sports car red, man green, "
+                                 "woman magenta, child cyan)" : "Objects are not shown");
+}
+
+/*!
+ * \brief ViewerScene::getShowObjects
+ * \return true if the images are tinted by the classes of the objects
+ */
+bool ViewerScene::getShowObjects() const
+{
+    return m_showObjects;
+}
+
+/*!
+ * \brief ViewerScene::hasObjects
+ * \return true if the model predicts the objects or the data files have them
+ */
+bool ViewerScene::hasObjects() const
+{
+    for (const auto &image : m_listCameraImage) {
+        if (image->hasPredictedObjects() || image->hasCorrectObjects()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /*!

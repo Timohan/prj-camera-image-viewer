@@ -22,8 +22,9 @@
 // version 2 has the sky output flag, version 1 files have no sky output,
 // version 3 has the pixel head size (pixelHidden, pixelWindow), version 4 has the surface output flag,
 // version 5 has the refine step size (refineHidden, refineWindow), version 6 has the two distances flag,
-// version 7 has the cameras after the weight tensors, version 8 has the geo inputs (geoInputs)
-#define MODEL_FILE_VERSION  8
+// version 7 has the cameras after the weight tensors, version 8 has the geo inputs (geoInputs),
+// version 9 has the object output flag (objectOutput)
+#define MODEL_FILE_VERSION  9
 // a model file cannot have more cameras than this
 #define MODEL_MAX_CAMERAS   1000
 
@@ -52,7 +53,7 @@ VisionTransformer::VisionTransformer(const Config &config, unsigned int seed) :
                                              : (config.skyOutput ? 2*m_patchOutputCount : m_patchOutputCount)),
     m_pixelInputCount(config.pixelWindow*config.pixelWindow*3),
     m_pixelOutputCount((config.skyOutput ? 2 : 1) + (config.surfaceOutput ? SURFACE_OUTPUT_COUNT : 0)
-                       + (config.twoDistances ? 2 : 0)),
+                       + (config.objectOutput ? OBJECT_OUTPUT_COUNT : 0) + (config.twoDistances ? 2 : 0)),
     m_refineInputCount(config.refineWindow*config.refineWindow*config.pixelHidden),
     m_pixelWeight(-1), m_pixelBias(-1), m_pixelOutWeight(-1), m_pixelOutBias(-1),
     m_refineWeight(-1), m_refineBias(-1), m_refineOutWeight(-1), m_refineOutBias(-1),
@@ -172,9 +173,11 @@ const float *VisionTransformer::value(int parameter) const
  * \param skyOutput if not nullptr and the network has the sky output, returns height x width sky logits
  * \param surfaceOutput if not nullptr and the network has the surface output, returns height x width x SURFACE_OUTPUT_COUNT
  * surface values (pixel_label.h)
+ * \param objectOutput if not nullptr and the network has the object output, returns height x width x OBJECT_OUTPUT_COUNT
+ * object values (pixel_label.h)
  */
 void VisionTransformer::forward(Workspace *workspace, const float *image, float *output, float *skyOutput,
-                                float *surfaceOutput) const
+                                float *surfaceOutput, float *objectOutput) const
 {
     const int patchSize = m_config.patchSize;
     const int columns = m_config.width/patchSize;
@@ -233,6 +236,7 @@ void VisionTransformer::forward(Workspace *workspace, const float *image, float 
                   m_headOutputCount, workspace->m_head.data());
     const bool sky = m_config.skyOutput && skyOutput;
     const bool surface = m_config.surfaceOutput && surfaceOutput;
+    const bool object = m_config.objectOutput && objectOutput;
     if (m_config.pixelHidden > 0) {
         // pixel head: hidden = token part + linear(colors around the pixel), output = linear(gelu(hidden))
         const int rows = count*m_patchOutputCount;
@@ -274,6 +278,9 @@ void VisionTransformer::forward(Workspace *workspace, const float *image, float 
             }
             if (surface) {
                 std::copy_n(values + m_surfaceOffset, SURFACE_OUTPUT_COUNT, surfaceOutput + pixel*SURFACE_OUTPUT_COUNT);
+            }
+            if (object) {
+                std::copy_n(values + m_objectOffset, OBJECT_OUTPUT_COUNT, objectOutput + pixel*OBJECT_OUTPUT_COUNT);
             }
         }
     }
@@ -416,6 +423,7 @@ void VisionTransformer::refineWindowsBackward(const float *refineInputGradient, 
  * the loss of the pixels near the depth jumps is multiplied by the edge weight, see setEdgeWeight()),
  * with the sky output also SKY_LOSS_WEIGHT*binary cross-entropy of the sky output of every pixel that is not ignored,
  * with the surface output and its targets also surfacePixelLoss() of pixel_label.h of every pixel,
+ * with the object output and its targets also objectPixelLoss() of pixel_label.h of every pixel,
  * uses the values of the latest forward() of the workspace
  * \param workspace workspace of the latest forward()
  * \param target height x width correct values
@@ -425,10 +433,14 @@ void VisionTransformer::refineWindowsBackward(const float *refineInputGradient, 
  * nullptr: surface outputs are not learned
  * \param surfaces height x width surface numbers
  * \param surfaceLoss if not nullptr, the surface loss is added to it
+ * \param objectTable OBJECT_TABLE_SIZE x OBJECT_TABLE_VALUES object targets of the surface numbers
+ * (ImageSamples::getObjectTable()), nullptr: object outputs are not learned (needs surfaces)
+ * \param objectLoss if not nullptr, the object loss is added to it
  * \return distance loss
  */
 double VisionTransformer::backward(Workspace *workspace, const float *target, const uint8_t *labels, double *skyLoss,
-                                   const float *normals, const int32_t *surfaces, double *surfaceLoss) const
+                                   const float *normals, const int32_t *surfaces, double *surfaceLoss,
+                                   const float *objectTable, double *objectLoss) const
 {
     const int patchSize = m_config.patchSize;
     const int columns = m_config.width/patchSize;
@@ -443,6 +455,8 @@ double VisionTransformer::backward(Workspace *workspace, const float *target, co
     const int s = skyOffset();
     const bool surface = m_config.surfaceOutput;
     const bool surfaceTarget = surface && normals && surfaces;
+    const bool object = m_config.objectOutput;
+    const bool objectTargets = object && objectTable && surfaces;
     const size_t width = static_cast<size_t>(m_config.width);
     double loss = 0.0;
     for (int t=0;t<count;t++) {
@@ -494,6 +508,13 @@ double VisionTransformer::backward(Workspace *workspace, const float *target, co
                         if (surfaceLoss) {
                             *surfaceLoss += static_cast<double>(pixelLoss);
                         }
+                    }
+                }
+                if (object) {
+                    const float pixelLoss = objectPixelLoss(head + m_objectOffset, objectTargets
+                        ? objectTarget(labels[pixel], surfaces[pixel], objectTable) : nullptr, dHead + m_objectOffset);
+                    if (objectLoss) {
+                        *objectLoss += static_cast<double>(pixelLoss);
                     }
                 }
                 if (!m_config.skyOutput) {
@@ -946,10 +967,11 @@ const std::vector<VisionTransformer::Camera> &VisionTransformer::getCameras() co
 /*!
  * \brief VisionTransformer::save
  * saves the network to a binary file (native byte order, little-endian on x86):
- * char[4] "VITM", uint32_t version (8), int32_t width, height, patchSize, dimension, heads, layers, mlpDimension,
+ * char[4] "VITM", uint32_t version (9), int32_t width, height, patchSize, dimension, heads, layers, mlpDimension,
  * skyOutput (0 or 1, missing in version 1 files), pixelHidden, pixelWindow (missing in version 1 and 2 files),
  * surfaceOutput (0 or 1, missing in version 1-3 files), refineHidden, refineWindow (missing in version 1-4 files),
  * twoDistances (0 or 1, missing in version 1-5 files), geoInputs (missing in version 1-7 files),
+ * objectOutput (0 or 1, missing in version 1-8 files),
  * float targetMean, targetScale (distance = exp(output*targetScale + targetMean) meters),
  * uint32_t count of the weight tensors, then for every tensor uint32_t count of the values and the float values,
  * uint32_t count of the cameras (missing in version 1-6 files), then for every camera uint32_t number, width, height,
@@ -991,6 +1013,7 @@ bool VisionTransformer::save(const std::string &filename, float targetMean, floa
         writeInt32(m_config.refineWindow);
         writeInt32(m_config.twoDistances ? 1 : 0);
         writeInt32(m_config.geoInputs);
+        writeInt32(m_config.objectOutput ? 1 : 0);
         writeFloat(targetMean);
         writeFloat(targetScale);
         writeUint32(static_cast<uint32_t>(m_parameters.size()));
@@ -1090,6 +1113,12 @@ std::unique_ptr<VisionTransformer> VisionTransformer::load(const std::string &fi
         file.read(reinterpret_cast<char *>(&geoInputs), sizeof(geoInputs));
         config.geoInputs = geoInputs;
     }
+    // versions 1-8 have no object output
+    if (version >= 9) {
+        int32_t objectOutput = 0;
+        file.read(reinterpret_cast<char *>(&objectOutput), sizeof(objectOutput));
+        config.objectOutput = objectOutput != 0;
+    }
     file.read(reinterpret_cast<char *>(targetMean), sizeof(*targetMean));
     file.read(reinterpret_cast<char *>(targetScale), sizeof(*targetScale));
     file.read(reinterpret_cast<char *>(&tensorCount), sizeof(tensorCount));
@@ -1104,7 +1133,8 @@ std::unique_ptr<VisionTransformer> VisionTransformer::load(const std::string &fi
         || (config.surfaceOutput && (config.pixelHidden <= 0 || !config.skyOutput)) || config.refineHidden < 0
         || (config.refineHidden > 0 && (config.pixelHidden <= 0 || config.refineWindow <= 0 || config.refineWindow%2 == 0))
         || (config.twoDistances && (config.pixelHidden <= 0 || !config.skyOutput))
-        || (config.geoInputs != 0 && config.geoInputs != GEO_INPUT_COUNT)) {
+        || (config.geoInputs != 0 && config.geoInputs != GEO_INPUT_COUNT)
+        || (config.objectOutput && !config.surfaceOutput)) {
         TG_ERROR_LOG(filename, "has an invalid network size");
         return nullptr;
     }

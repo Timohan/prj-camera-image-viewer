@@ -19,6 +19,10 @@
  * predicted) is put far away (sky dome). Positions are in opengl units (1000 mm = 1.0).
  * The fill meshes have the triangles over the edges that the meshes do not have, colored by their farthest pixel
  * (the background behind the edge), they fill the black areas that no camera sees (see ViewerScene::render()).
+ * Objects: a model with the object output predicts the object of every pixel (ground, other object, sedan, SUV, sports
+ * car, man, woman, child and the box of a car or a person), the data file has the correct object of every surface
+ * ("OBJS" of the newer creator). The object textures are the image tinted by the class of the object of every pixel
+ * (OBJECT_COLORS of camera_image.cpp).
  */
 class CameraImage
 {
@@ -29,6 +33,16 @@ public:
         ConnectedDown = 2
     };
 
+    // object of a pixel predicted by the model (pixel_label.h object outputs)
+    struct ObjectPixel {
+        uint8_t objectClass = NO_OBJECT;    // class of the model (0 ground ... 7 child), NO_OBJECT: sky
+        uint8_t probability = 0;            // probability of the class, percent
+        float center[3] = { 0.0f, 0.0f, 0.0f };     // center of the box in the camera (x right, y down, z forward), m
+        float heading[2] = { 1.0f, 0.0f };          // cos and sin of the angle from the forward of the camera to the front
+        float size[3] = { 0.0f, 0.0f, 0.0f };       // width, height and length of the box, m
+    };
+    static const uint8_t NO_OBJECT = 255;
+
     CameraImage();
     ~CameraImage();
     CameraImage(const CameraImage &) = delete;
@@ -36,11 +50,15 @@ public:
 
     bool load(const std::string &filename, const VisionTransformer::Camera &camera);
     bool hasCorrectDistances() const;
+    bool hasCorrectObjects() const;
+    bool hasPredictedObjects() const;
     void setPrediction(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
-                       const std::vector<uint8_t> &connections);
+                       const std::vector<uint8_t> &connections, const std::vector<ObjectPixel> &objects);
     int createMeshes(GLint vertexAttribute, GLint textureCoordinateAttribute);
-    void render(bool correctDistances, bool fillMesh = false) const;
+    // objects: the image is tinted by the classes of the objects (correct or predicted ones like the distances)
+    void render(bool correctDistances, bool fillMesh = false, bool objects = false) const;
     std::string getDistanceText(int x, int y, bool correctDistances, const VECTOR3 &point) const;
+    std::string getObjectText(int x, int y, bool correctObjects) const;
 
     const cv::Mat &getImage() const;
     int getCameraNumber() const;
@@ -59,11 +77,25 @@ private:
     std::vector<uint8_t> m_predictedSky;    // 1 = model predicted sky
     std::vector<uint8_t> m_correctConnections;      // Connection of every pixel, empty if the data file has no surfaces
     std::vector<uint8_t> m_predictedConnections;    // empty if the model has no surface output
+    // correct object of a surface number of the data file
+    struct CorrectObject {
+        uint32_t objectClass = 0;           // class of the data file (0 sky, 1 ground, 2 other object, 3 sedan ... 8 child)
+        double center[3] = { 0.0, 0.0, 0.0 };   // center of the box in the world, mm
+        double size[3] = { 0.0, 0.0, 0.0 };     // width, height and length of the box, mm
+        double yaw = 0.0;                       // degrees, 0 is +z, positive turns to +x
+    };
+    std::vector<uint32_t> m_correctSurfaces;        // surface number of every pixel, empty if the data file has none
+    std::vector<CorrectObject> m_correctObjects;    // by the surface number, empty if the data file has no objects
+    std::vector<ObjectPixel> m_predictedObjects;    // of every pixel, empty if the model has no object output
     std::vector<VECTOR3> m_rays;            // normalized ray of every pixel in the world
     int m_cameraNumber;
     double m_position[3];                   // mm
     double m_direction[3];
+    double m_right[3];                      // axes of the camera in the world: right, up (perpendicular to the direction)
+    double m_up[3];
     GLuint m_texture;
+    GLuint m_correctObjectTexture;          // image tinted by the classes, 0 if the objects are not known
+    GLuint m_predictedObjectTexture;
     Mesh m_correctMesh;
     Mesh m_predictedMesh;
     Mesh m_correctFillMesh;
@@ -77,6 +109,9 @@ private:
     static void uploadMesh(const std::vector<float> &vertices, GLint vertexAttribute, GLint textureCoordinateAttribute,
                            Mesh *mesh);
     static void deleteMesh(Mesh *mesh);
+    GLuint createTexture(const cv::Mat &image) const;
+    cv::Mat tintImage(bool correctObjects) const;
+    std::string objectText(int objectClass, int probability, const double *center, const double *size, double yaw) const;
 };
 
 #endif // CAMERA_IMAGE_H

@@ -7,6 +7,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include "pixel_label.h"
 
 /*!
  * \brief VisionTransformer
@@ -30,6 +31,9 @@
  * The output weights of the refine step start from 0, so the refine step starts as no correction.
  * With twoDistances the pixel head gives a near and a far distance and a choice logit, the output distance is
  * the chosen one (chosenDistance() of pixel_label.h), so an edge pixel is the near or the far surface instead of their mean.
+ * With objectOutput the pixel head gives also the object of every pixel (OBJECT_OUTPUT_COUNT values of pixel_label.h):
+ * the class of the object (ground, unknown object, sedan, SUV, sports car, man, woman, child) and of a car or a person
+ * the center, the heading and the sizes of its box in the camera.
  *
  * The model file has also the cameras of the training images (position, direction and lens of every camera,
  * all images of a camera are from the same place), so a viewer needs only the images and the model file.
@@ -58,6 +62,7 @@ public:
         bool twoDistances = false;  // true: the pixel head gives two distances and the choice between them (pixel_label.h),
                                     // needs the pixel head and skyOutput
         int geoInputs = 0;  // values of every pixel after its 3 colors in the image: 0 or GEO_INPUT_COUNT (geoInput())
+        bool objectOutput = false;  // true: every pixel has also the object outputs, needs surfaceOutput
         int inputChannels() const { return 3 + geoInputs; }
     };
 
@@ -149,9 +154,10 @@ public:
     int getParameterTensorCount() const;
     std::vector<float> &getParameter(int parameter);
     void forward(Workspace *workspace, const float *image, float *output, float *skyOutput = nullptr,
-                 float *surfaceOutput = nullptr) const;
+                 float *surfaceOutput = nullptr, float *objectOutput = nullptr) const;
     double backward(Workspace *workspace, const float *target, const uint8_t *labels, double *skyLoss = nullptr,
-                    const float *normals = nullptr, const int32_t *surfaces = nullptr, double *surfaceLoss = nullptr) const;
+                    const float *normals = nullptr, const int32_t *surfaces = nullptr, double *surfaceLoss = nullptr,
+                    const float *objectTable = nullptr, double *objectLoss = nullptr) const;
     void adamStep(const std::vector<Workspace *> &workspaces, float learningRate, float gradientScale);
     void setHuberDelta(float huberDelta);
     float getHuberDelta() const;
@@ -181,6 +187,7 @@ private:
                                 // pixel head: m_patchOutputCount*pixelHidden
     int m_pixelInputCount;      // pixelWindow*pixelWindow*3
     int m_pixelOutputCount;     // pixel head: 1, with skyOutput 2, with surfaceOutput 2 + SURFACE_OUTPUT_COUNT,
+                                // with objectOutput OBJECT_OUTPUT_COUNT more after the surface outputs,
                                 // with twoDistances 2 more (the gap of the far distance and the choice logit are the last ones)
     int m_refineInputCount;     // refineWindow*refineWindow*pixelHidden
     std::vector<Parameter> m_parameters;
@@ -218,6 +225,7 @@ private:
     float *headValues(std::vector<float> &head, std::vector<float> &pixelOutput, int t, int k) const;
     int skyOffset() const;
     static const int m_surfaceOffset = 2;   // surface outputs of the pixel head are after the distance and the sky
+    static const int m_objectOffset = 2 + SURFACE_OUTPUT_COUNT;     // object outputs are after the surface outputs
 };
 
 #endif // VISION_TRANSFORMER_H

@@ -7,6 +7,8 @@
 #define PIXEL_LABEL_WIDTH           500
 #define DISTANCES_LABEL_WIDTH       260
 #define FILL_LABEL_WIDTH            220
+#define OBJECTS_LABEL_WIDTH         200
+#define OBJECT_LABEL_WIDTH          1220
 #define LABEL_BACKGROUND_COLOR      30, 80, 200, 255
 #define LABEL_TEXT_COLOR            255, 255, 255
 #define PIXEL_LABEL_START_TEXT      "Click a pixel"
@@ -23,7 +25,13 @@ MainWindow::MainWindow(int width, int height, std::unique_ptr<ViewerScene> viewe
     m_distancesText(&m_distancesBackground, "", "", LABEL_FONT_SIZE, LABEL_TEXT_COLOR),
     m_fillBackground(this, 3*LABEL_MARGIN + PIXEL_LABEL_WIDTH + DISTANCES_LABEL_WIDTH, LABEL_MARGIN, FILL_LABEL_WIDTH,
                      LABEL_HEIGHT, LABEL_BACKGROUND_COLOR),
-    m_fillText(&m_fillBackground, "", "", LABEL_FONT_SIZE, LABEL_TEXT_COLOR)
+    m_fillText(&m_fillBackground, "", "", LABEL_FONT_SIZE, LABEL_TEXT_COLOR),
+    m_objectsBackground(this, 4*LABEL_MARGIN + PIXEL_LABEL_WIDTH + DISTANCES_LABEL_WIDTH + FILL_LABEL_WIDTH, LABEL_MARGIN,
+                        OBJECTS_LABEL_WIDTH, LABEL_HEIGHT, LABEL_BACKGROUND_COLOR),
+    m_objectsText(&m_objectsBackground, "", "", LABEL_FONT_SIZE, LABEL_TEXT_COLOR),
+    m_objectBackground(this, LABEL_MARGIN, 2*LABEL_MARGIN + LABEL_HEIGHT, OBJECT_LABEL_WIDTH, LABEL_HEIGHT,
+                       LABEL_BACKGROUND_COLOR),
+    m_objectText(&m_objectBackground, "", "", LABEL_FONT_SIZE, LABEL_TEXT_COLOR)
 {
     m_pixelText.setHorizontalAlign(TgTextfieldHorizontalAlign::AlignCenterH);
     m_pixelText.setVerticalAlign(TgTextfieldVerticalAlign::AlignCenterV);
@@ -31,8 +39,15 @@ MainWindow::MainWindow(int width, int height, std::unique_ptr<ViewerScene> viewe
     m_distancesText.setVerticalAlign(TgTextfieldVerticalAlign::AlignCenterV);
     m_fillText.setHorizontalAlign(TgTextfieldHorizontalAlign::AlignCenterH);
     m_fillText.setVerticalAlign(TgTextfieldVerticalAlign::AlignCenterV);
+    m_objectsText.setHorizontalAlign(TgTextfieldHorizontalAlign::AlignCenterH);
+    m_objectsText.setVerticalAlign(TgTextfieldVerticalAlign::AlignCenterV);
+    m_objectText.setHorizontalAlign(TgTextfieldHorizontalAlign::AlignCenterH);
+    m_objectText.setVerticalAlign(TgTextfieldVerticalAlign::AlignCenterV);
+    m_objectsBackground.setVisible(m_viewerScene->hasObjects());
+    m_objectBackground.setVisible(false);
     updateDistancesText();
     updateFillText();
+    updateObjectsText();
     m_viewKeyListener.onCameraSelected = [this](int index) {
         m_viewerScene->moveToCamera(index);
     };
@@ -45,6 +60,11 @@ MainWindow::MainWindow(int width, int height, std::unique_ptr<ViewerScene> viewe
     m_viewKeyListener.onToggleFillGaps = [this]() {
         m_viewerScene->toggleFillGaps();
         updateFillText();
+    };
+    m_viewKeyListener.onToggleObjects = [this]() {
+        m_viewerScene->toggleObjects();
+        updateObjectsText();
+        requestRender();
     };
     m_viewKeyListener.onTurnStart = [this](int direction) {
         m_viewerScene->startTurn(direction);
@@ -90,6 +110,10 @@ void MainWindow::customRender()
     m_viewerScene->render(getWidth(), getHeight());
     if (m_viewerScene->takePicked()) {
         m_pixelText.setText(m_viewerScene->getPickedText().c_str());
+        if (m_viewerScene->hasObjects()) {
+            m_objectText.setText(m_viewerScene->getPickedObjectText().c_str());
+            m_objectBackground.setVisible(true);
+        }
         requestRender();
     }
 }
@@ -97,6 +121,11 @@ void MainWindow::customRender()
 void MainWindow::updateDistancesText()
 {
     m_distancesText.setText(m_viewerScene->getCorrectDistances() ? "Correct distances" : "Predicted distances");
+}
+
+void MainWindow::updateObjectsText()
+{
+    m_objectsText.setText(m_viewerScene->getShowObjects() ? "Objects: on" : "Objects: off");
 }
 
 void MainWindow::updateFillText()

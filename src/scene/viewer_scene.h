@@ -17,6 +17,8 @@
  * A point of the window can be picked: the next render finds the camera image pixel that is shown there.
  * Black areas (places that no camera sees, behind the edges of the objects) can be filled with the background
  * behind the edge (fill meshes of CameraImage).
+ * Objects: the images can be tinted by the classes of the objects of their pixels (predicted by a model with the object
+ * output, or the correct ones of the data files with the correct distances), and the picked pixel shows its object.
  */
 class ViewerScene
 {
@@ -29,12 +31,16 @@ public:
     void pick(float x, float y);
     bool takePicked();
     std::string getPickedText() const;
+    std::string getPickedObjectText() const;
     void moveToCamera(int index);
     void toggleDistances();
     bool getCorrectDistances() const;
     bool hasCorrectDistances() const;
     void toggleFillGaps();
     bool getFillGaps() const;
+    void toggleObjects();
+    bool getShowObjects() const;
+    bool hasObjects() const;
     void startTurn(int direction);
     void stopTurn(int direction);
     void startPitch(int direction);
@@ -47,6 +53,7 @@ private:
     std::vector<std::unique_ptr<CameraImage>> m_listCameraImage;
     bool m_correctDistances;    // true: correct distances, false: predicted distances
     bool m_fillGaps;            // black areas are filled with the fill meshes
+    bool m_showObjects;         // images are tinted by the classes of the objects
     VECTOR3 m_position;         // view camera, opengl units
     float m_yaw;                // radians, 0 looks to +z, positive turns to +x
     float m_pitch;              // radians, positive looks up

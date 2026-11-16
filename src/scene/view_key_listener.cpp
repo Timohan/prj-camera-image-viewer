@@ -42,6 +42,10 @@ TgEventResult ViewKeyListener::handleEvent(TgEventData *eventData, const TgWindo
             onToggleFillGaps();
             return TgEventResult::EventResultCompleted;
         }
+        if (key == 'o' && onToggleObjects) {
+            onToggleObjects();
+            return TgEventResult::EventResultCompleted;
+        }
     }
     return TgItem2d::handleEvent(eventData, windowInfo);
 }

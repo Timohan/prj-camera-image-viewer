@@ -1,4 +1,5 @@
 #include "distance_model.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <thread>
@@ -38,8 +39,18 @@ bool DistanceModel::load(const std::string &filename)
                  std::to_string(config.patchSize) + "x" + std::to_string(config.patchSize), "tokens,",
                  m_network->getParameterCount(), "weights,",
                  config.surfaceOutput ? "edges of the surfaces from the model" : "edges from the distance jumps",
-                 config.geoInputs > 0 ? ", distances also from the other cameras (matching)" : "");
+                 config.geoInputs > 0 ? ", distances also from the other cameras (matching)" : "",
+                 config.objectOutput ? ", objects of the pixels (cars and people)" : "");
     return true;
+}
+
+/*!
+ * \brief DistanceModel::hasObjectOutput
+ * \return true if the model predicts the objects of the pixels
+ */
+bool DistanceModel::hasObjectOutput() const
+{
+    return m_network && m_network->getConfig().objectOutput;
 }
 
 /*!
@@ -107,6 +118,7 @@ std::vector<DistanceModel::Prediction> DistanceModel::predict(const std::vector<
         const int channels = config.inputChannels();
         std::vector<float> input(pixels*channels, 0.0f), output(pixels), skyOutput(pixels);
         std::vector<float> surfaceOutput(config.surfaceOutput ? pixels*SURFACE_OUTPUT_COUNT : 0);
+        std::vector<float> objectOutput(config.objectOutput ? pixels*OBJECT_OUTPUT_COUNT : 0);
         for (int y=0;y<image.rows;y++) {
             const cv::Vec3b *row = image.ptr<cv::Vec3b>(y);
             for (int x=0;x<image.cols;x++) {
@@ -125,11 +137,13 @@ std::vector<DistanceModel::Prediction> DistanceModel::predict(const std::vector<
         }
         VisionTransformer::Workspace workspace(*m_network);
         m_network->forward(&workspace, input.data(), output.data(), skyOutput.data(),
-                           config.surfaceOutput ? surfaceOutput.data() : nullptr);
+                           config.surfaceOutput ? surfaceOutput.data() : nullptr,
+                           config.objectOutput ? objectOutput.data() : nullptr);
         Prediction &prediction = result[index];
         prediction.distances.resize(static_cast<size_t>(image.cols)*image.rows);
         prediction.sky.resize(prediction.distances.size());
         prediction.connections.resize(config.surfaceOutput ? prediction.distances.size() : 0);
+        prediction.objects.resize(config.objectOutput ? prediction.distances.size() : 0);
         for (int y=0;y<image.rows;y++) {
             for (int x=0;x<image.cols;x++) {
                 const size_t source = static_cast<size_t>(y)*config.width + x;
@@ -142,6 +156,25 @@ std::vector<DistanceModel::Prediction> DistanceModel::predict(const std::vector<
                     const float *surface = surfaceOutput.data() + source*SURFACE_OUTPUT_COUNT;
                     prediction.connections[pixel] = static_cast<uint8_t>((surface[SURFACE_RIGHT] > 0.0f ? CameraImage::ConnectedRight : 0)
                                                                          | (surface[SURFACE_DOWN] > 0.0f ? CameraImage::ConnectedDown : 0));
+                }
+                if (config.objectOutput && !prediction.sky[pixel]) {
+                    // class of the largest logit and its softmax probability, the box values like ImageSamples::getObjectTable()
+                    const float *values = objectOutput.data() + source*OBJECT_OUTPUT_COUNT;
+                    const int best = static_cast<int>(std::max_element(values, values + OBJECT_CLASS_COUNT) - values);
+                    double sum = 0.0;
+                    for (int c=0;c<OBJECT_CLASS_COUNT;c++) {
+                        sum += std::exp(static_cast<double>(values[c] - values[best]));
+                    }
+                    CameraImage::ObjectPixel &object = prediction.objects[pixel];
+                    object.objectClass = static_cast<uint8_t>(best);
+                    object.probability = static_cast<uint8_t>(std::lround(100.0/sum));
+                    for (int k=0;k<3;k++) {
+                        object.center[k] = values[OBJECT_CENTER + k]*OBJECT_CENTER_SCALE;
+                        object.size[k] = std::exp(values[OBJECT_SIZE + k]);
+                    }
+                    const float length = std::hypot(values[OBJECT_HEADING], values[OBJECT_HEADING + 1]);
+                    object.heading[0] = length > 0.0f ? values[OBJECT_HEADING]/length : 1.0f;
+                    object.heading[1] = length > 0.0f ? values[OBJECT_HEADING + 1]/length : 0.0f;
                 }
             }
         }

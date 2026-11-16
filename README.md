@@ -97,6 +97,18 @@ Keys:
   of the surface from the camera of the image there (`Camera <number> <x>/<y> Distance from camera: <mm>`) with the
   shown distances, `Sky` for the sky and `N/A` for a black area or a pixel that sees nothing. The point is between the
   pixels of its triangle, near the horizon one pixel can be tens of meters long.
+  With the objects (a model with the object output or .dat files with the objects) a second label shows the object
+  of the clicked pixel, the predicted one with the predicted distances and the correct one of the .dat file with the
+  correct distances, for example `Predicted object: SUV (97%), 4.80 m long, 1.86 m wide, 1.84 m high, 12.3 m away,
+  heading 35 degrees` (a person: `child (88%), 1.25 m tall, 8.0 m away, heading 120 degrees`). The probability is of
+  the predicted class, the distance is from the camera to the center of the box, the heading is the yaw of the
+  objects file (0 is +z, positive turns to +x). The model predicts the box at every pixel, so the pixels of one car can
+  give a little different boxes.
+- o tints the images by the classes of the objects of the pixels or shows the images (the label at the top left
+  corner shows if it is on or off (default), only with the objects): the predicted objects with the predicted
+  distances, the correct objects of the .dat files with the correct distances. Colors: other object (cube, ball,
+  cylinder, cone) blue, sedan yellow, SUV orange, sports car red, man green, woman magenta, child cyan, the ground
+  and the sky are not tinted.
 
 The camera positions and lenses are from the model (prj-camera-image-learner model file version 7, the training saves
 them), so only the png files are needed, the .dat files are read only for the correct distances if they are there.
@@ -109,5 +121,8 @@ A model that is trained with the distances from the other cameras (`prj-camera-i
 version 8) needs them also here: before the prediction the 6 images are matched with the cameras of the model exactly
 like the .geo files of the training (StereoMatcher, a few seconds with all CPU threads). model/default.model is such
 a model, so the 6 images of the scene must be from the cameras of the model.
+A model that is trained with the objects (`prj-camera-image-learner --objects`, model file version 9, for example
+/mnt/camera/camera_training_objects/vision_transformer_objects.model) predicts also the object of every pixel (key o
+and the clicked pixel), the older models work as before.
 Pixels that the model predicts as sky are put far away (sky dome), so the model must have the sky output
 (prj-camera-image-learner model file version 2). Black areas are places that no camera sees.

@@ -1,6 +1,7 @@
 #include "camera_image.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -10,6 +11,7 @@
 #include "global_log.h"
 
 #define MM_TO_OPENGL_UNIT           1000.0
+#define MM_PER_METER                1000.0
 // distances at least this far (mm) are the sky, the creator saves the sky as far as the sun
 #define SKY_DISTANCE_MM             1.0e12
 // sky and the predicted pixels above the horizon are put this far (mm)
@@ -25,17 +27,44 @@ static_assert(DATA_CAMERA_INFO_VALUES == VisionTransformer::CAMERA_VALUE_COUNT, 
 // surface block after the camera information
 #define DATA_SURFACE_MAGIC          "SURF"
 #define DATA_SURFACE_VERSION        1
+// what the surface numbers are, after the surfaces
+#define DATA_OBJECTS_MAGIC          "OBJS"
+#define DATA_OBJECTS_VERSION        1
+// image colors are mixed this much with the color of the class of the object (object textures)
+#define OBJECT_TINT                 0.55
 // undistortPoints iterations and accuracy in pixels like in prj-camera-image-creator
 #define UNDISTORT_MAX_ITERATIONS    200
 #define UNDISTORT_EPSILON_PIXELS    0.001
 // values of a vertex: x, y, z, s, t
 #define VERTEX_VALUES               5
 
+// first class of the people (man, woman, child) like in the learner (object_errors.h)
+#define OBJECT_FIRST_PERSON_CLASS   5
+// classes of the model (pixel_label.h), the class of the data file is one larger (0 is the sky there)
+static const char *const OBJECT_NAMES[OBJECT_CLASS_COUNT] = { "ground", "other object", "sedan", "SUV", "sports car",
+                                                              "man", "woman", "child" };
+// RGB tint of the classes, the ground is not tinted
+static const int OBJECT_COLORS[OBJECT_CLASS_COUNT][3] = {
+    { -1, -1, -1 },         // ground
+    { 60, 120, 255 },       // other object (cube, ball, cylinder, cone): blue
+    { 255, 220, 0 },        // sedan: yellow
+    { 255, 130, 0 },        // SUV: orange
+    { 255, 30, 30 },        // sports car: red
+    { 40, 220, 60 },        // man: green
+    { 230, 60, 230 },       // woman: magenta
+    { 0, 230, 230 }         // child: cyan
+};
+static_assert(OBJECT_CLASS_COUNT == 8, "names and colors of the object classes");
+
 CameraImage::CameraImage() :
     m_cameraNumber(0),
     m_position{ 0.0, 0.0, 0.0 },
     m_direction{ 0.0, 0.0, 1.0 },
-    m_texture(0)
+    m_right{ 1.0, 0.0, 0.0 },
+    m_up{ 0.0, 1.0, 0.0 },
+    m_texture(0),
+    m_correctObjectTexture(0),
+    m_predictedObjectTexture(0)
 {
 }
 
@@ -45,8 +74,10 @@ CameraImage::~CameraImage()
     deleteMesh(&m_predictedMesh);
     deleteMesh(&m_correctFillMesh);
     deleteMesh(&m_predictedFillMesh);
-    if (m_texture) {
-        glDeleteTextures(1, &m_texture);
+    for (GLuint texture : { m_texture, m_correctObjectTexture, m_predictedObjectTexture }) {
+        if (texture) {
+            glDeleteTextures(1, &texture);
+        }
     }
 }
 
@@ -88,12 +119,32 @@ bool CameraImage::hasCorrectDistances() const
 }
 
 /*!
+ * \brief CameraImage::hasCorrectObjects
+ * \return true if the data file had the objects of the surface numbers
+ */
+bool CameraImage::hasCorrectObjects() const
+{
+    return !m_correctObjects.empty() && !m_correctSurfaces.empty();
+}
+
+/*!
+ * \brief CameraImage::hasPredictedObjects
+ * \return true if the model has the object output
+ */
+bool CameraImage::hasPredictedObjects() const
+{
+    return !m_predictedObjects.empty();
+}
+
+/*!
  * \brief CameraImage::readData
  * reads the correct distances of the data file of prj-camera-image-creator: uint32_t width, height, double distance (mm)
  * of every pixel, char[4] "CAMI", uint32_t version, camera number, distortion model and 36 doubles (the camera and
  * lens are from the model, only the camera number is checked), then optionally char[4] "SURF", uint32_t version,
  * uint32_t surface number of every pixel and the normals: neighbouring pixels of the same surface number are connected
- * (0 is the sky).
+ * (0 is the sky), then optionally char[4] "OBJS", uint32_t version, uint32_t count and of every surface uint32_t
+ * surface number, uint32_t class and doubles center x/y/z (mm), sizes x/y/z (mm), yaw, pitch, roll (degrees) of the box
+ * of its object.
  * \return true on success
  */
 bool CameraImage::readData(const std::string &filename)
@@ -126,6 +177,8 @@ bool CameraImage::readData(const std::string &filename)
     }
     // older data files have no surfaces
     m_correctConnections.clear();
+    m_correctSurfaces.clear();
+    m_correctObjects.clear();
     uint32_t surfaceVersion = 0;
     file.read(magic, sizeof(magic));
     file.read(reinterpret_cast<char *>(&surfaceVersion), sizeof(surfaceVersion));
@@ -133,6 +186,7 @@ bool CameraImage::readData(const std::string &filename)
         std::vector<uint32_t> surfaces(static_cast<size_t>(width)*height);
         file.read(reinterpret_cast<char *>(surfaces.data()), static_cast<std::streamsize>(surfaces.size()*sizeof(uint32_t)));
         if (file) {
+            m_correctSurfaces = surfaces;
             m_correctConnections.assign(surfaces.size(), 0);
             for (uint32_t y=0;y<height;y++) {
                 for (uint32_t x=0;x<width;x++) {
@@ -146,6 +200,38 @@ bool CameraImage::readData(const std::string &filename)
                     if (y + 1 < height && surfaces[i + width] == surfaces[i]) {
                         m_correctConnections[i] |= ConnectedDown;
                     }
+                }
+            }
+            // normals of the pixels, then the objects of the surfaces (older data files have no objects)
+            file.seekg(static_cast<std::streamoff>(surfaces.size()*3*sizeof(float)), std::ios::cur);
+            uint32_t objectsVersion = 0, count = 0;
+            file.read(magic, sizeof(magic));
+            file.read(reinterpret_cast<char *>(&objectsVersion), sizeof(objectsVersion));
+            file.read(reinterpret_cast<char *>(&count), sizeof(count));
+            if (file && memcmp(magic, DATA_OBJECTS_MAGIC, sizeof(magic)) == 0 && objectsVersion == DATA_OBJECTS_VERSION) {
+                std::vector<CorrectObject> objects;
+                for (uint32_t i=0;i<count && file;i++) {
+                    uint32_t surface = 0;
+                    CorrectObject object;
+                    double values[9];
+                    file.read(reinterpret_cast<char *>(&surface), sizeof(surface));
+                    file.read(reinterpret_cast<char *>(&object.objectClass), sizeof(object.objectClass));
+                    file.read(reinterpret_cast<char *>(values), sizeof(values));
+                    if (!file || surface > surfaces.size()) {
+                        break;
+                    }
+                    for (int k=0;k<3;k++) {
+                        object.center[k] = values[k];
+                        object.size[k] = values[3 + k];
+                    }
+                    object.yaw = values[6];
+                    if (objects.size() <= surface) {
+                        objects.resize(static_cast<size_t>(surface) + 1);
+                    }
+                    objects[surface] = object;
+                }
+                if (file) {
+                    m_correctObjects = std::move(objects);
                 }
             }
         }
@@ -174,6 +260,20 @@ void CameraImage::setCamera(const VisionTransformer::Camera &camera)
     const VECTOR3 up = { static_cast<float>(values[6]), static_cast<float>(values[7]), static_cast<float>(values[8]) };
     // left-handed world (x right, y up, z forward): right = up x forward
     const VECTOR3 right = Math3D::Vec3Normalize(Math3D::Vec3Cross(up, forward));
+    // axes of the boxes of the model like in the learner (CameraPosition::toCamera): the up is made perpendicular to
+    // the direction, up = forward x right
+    {
+        const double *f = values + 3;
+        const double *u = values + 6;
+        double r[3] = { u[1]*f[2] - u[2]*f[1], u[2]*f[0] - u[0]*f[2], u[0]*f[1] - u[1]*f[0] };
+        const double length = std::sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+        for (int i=0;i<3;i++) {
+            m_right[i] = length > 0.0 ? r[i]/length : 0.0;
+        }
+        m_up[0] = f[1]*m_right[2] - f[2]*m_right[1];
+        m_up[1] = f[2]*m_right[0] - f[0]*m_right[2];
+        m_up[2] = f[0]*m_right[1] - f[1]*m_right[0];
+    }
     const cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << values[15], 0.0, values[17],
                                                             0.0, values[16], values[18],
                                                             0.0, 0.0, 1.0);
@@ -210,13 +310,71 @@ void CameraImage::setCamera(const VisionTransformer::Camera &camera)
  * \param distances predicted distance (mm) of every pixel
  * \param sky 1 if the model predicted that the pixel is sky
  * \param connections Connection of every pixel, empty if the model has no surface output
+ * \param objects object of every pixel, empty if the model has no object output
  */
 void CameraImage::setPrediction(const std::vector<double> &distances, const std::vector<uint8_t> &sky,
-                                const std::vector<uint8_t> &connections)
+                                const std::vector<uint8_t> &connections, const std::vector<ObjectPixel> &objects)
 {
     m_predictedDistances = distances;
     m_predictedSky = sky;
     m_predictedConnections = connections;
+    m_predictedObjects = objects;
+}
+
+/*!
+ * \brief CameraImage::createTexture
+ * \param image RGB image of the size of the camera image
+ * \return texture, opengl context must be current
+ */
+GLuint CameraImage::createTexture(const cv::Mat &image) const
+{
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    // rows of the image are 3*width bytes, not 4 byte aligned
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image.cols, image.rows, 0, GL_RGB, GL_UNSIGNED_BYTE, image.data);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return texture;
+}
+
+/*!
+ * \brief CameraImage::tintImage
+ * \param correctObjects true: the objects of the data file, false: the objects predicted by the model
+ * \return the image mixed with the color of the class of the object of every pixel (OBJECT_COLORS), the sky and the
+ * ground keep their colors
+ */
+cv::Mat CameraImage::tintImage(bool correctObjects) const
+{
+    cv::Mat image = m_image.clone();
+    for (int y=0;y<image.rows;y++) {
+        cv::Vec3b *row = image.ptr<cv::Vec3b>(y);
+        for (int x=0;x<image.cols;x++) {
+            const size_t i = static_cast<size_t>(y)*image.cols + x;
+            int objectClass = -1;
+            if (correctObjects) {
+                const uint32_t surface = m_correctSurfaces[i];
+                if (surface < m_correctObjects.size() && m_correctObjects[surface].objectClass > 0
+                    && m_correctObjects[surface].objectClass <= static_cast<uint32_t>(OBJECT_CLASS_COUNT)) {
+                    objectClass = static_cast<int>(m_correctObjects[surface].objectClass) - 1;
+                }
+            } else if (m_predictedObjects[i].objectClass < OBJECT_CLASS_COUNT) {
+                objectClass = m_predictedObjects[i].objectClass;
+            }
+            if (objectClass < 0 || OBJECT_COLORS[objectClass][0] < 0) {
+                continue;
+            }
+            for (int c=0;c<3;c++) {
+                row[x][c] = static_cast<uint8_t>(std::lround((1.0 - OBJECT_TINT)*row[x][c] + OBJECT_TINT*OBJECT_COLORS[objectClass][c]));
+            }
+        }
+    }
+    return image;
 }
 
 /*!
@@ -227,17 +385,13 @@ void CameraImage::setPrediction(const std::vector<double> &distances, const std:
  */
 int CameraImage::createMeshes(GLint vertexAttribute, GLint textureCoordinateAttribute)
 {
-    glGenTextures(1, &m_texture);
-    glBindTexture(GL_TEXTURE_2D, m_texture);
-    // rows of the image are 3*width bytes, not 4 byte aligned
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, m_image.cols, m_image.rows, 0, GL_RGB, GL_UNSIGNED_BYTE, m_image.data);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    m_texture = createTexture(m_image);
+    if (hasCorrectObjects()) {
+        m_correctObjectTexture = createTexture(tintImage(true));
+    }
+    if (hasPredictedObjects()) {
+        m_predictedObjectTexture = createTexture(tintImage(false));
+    }
     // without the data file only the predicted distances are known
     if (hasCorrectDistances()) {
         // sky of the data file is very far or 0 (pixel sees nothing)
@@ -374,13 +528,16 @@ void CameraImage::uploadMesh(const std::vector<float> &vertices, GLint vertexAtt
  * \brief CameraImage::render
  * \param correctDistances true: mesh of the correct distances, false: mesh of the predicted distances
  * \param fillMesh true: the fill mesh (triangles over the edges)
+ * \param objects true: the image tinted by the classes of the objects (the correct ones with the correct distances),
+ * the image itself if those objects are not known
  */
-void CameraImage::render(bool correctDistances, bool fillMesh) const
+void CameraImage::render(bool correctDistances, bool fillMesh, bool objects) const
 {
     const Mesh &mesh = fillMesh ? (correctDistances ? m_correctFillMesh : m_predictedFillMesh)
                                 : (correctDistances ? m_correctMesh : m_predictedMesh);
+    const GLuint objectTexture = correctDistances ? m_correctObjectTexture : m_predictedObjectTexture;
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_texture);
+    glBindTexture(GL_TEXTURE_2D, objects && objectTexture ? objectTexture : m_texture);
     glBindVertexArray(mesh.vertexArray);
     glDrawArrays(GL_TRIANGLES, 0, mesh.vertexCount);
     glBindVertexArray(0);
@@ -416,6 +573,92 @@ std::string CameraImage::getDistanceText(int x, int y, bool correctDistances, co
     const double dy = point.y*MM_TO_OPENGL_UNIT - m_position[1];
     const double dz = point.z*MM_TO_OPENGL_UNIT - m_position[2];
     return std::to_string(static_cast<long long>(std::llround(std::sqrt(dx*dx + dy*dy + dz*dz)))) + " mm";
+}
+
+/*!
+ * \brief CameraImage::getObjectText
+ * \param x, y pixel of the image
+ * \param correctObjects true: the object of the data file, false: the object predicted by the model
+ * \return the object of the pixel, for example "SUV (97%), 4.80 m long, 1.86 m wide, 1.84 m high, 12.3 m away,
+ * heading 35 degrees" (the predicted ones with the probability of the class), "Sky", or "N/A" if it is not known
+ */
+std::string CameraImage::getObjectText(int x, int y, bool correctObjects) const
+{
+    if (x < 0 || y < 0 || x >= m_image.cols || y >= m_image.rows) {
+        return "N/A";
+    }
+    const size_t i = static_cast<size_t>(y)*m_image.cols + x;
+    if (correctObjects) {
+        if (!hasCorrectObjects()) {
+            return "N/A (no objects in the data file)";
+        }
+        const uint32_t surface = m_correctSurfaces[i];
+        if (surface >= m_correctObjects.size()) {
+            return "N/A";
+        }
+        const CorrectObject &object = m_correctObjects[surface];
+        if (object.objectClass == 0 || object.objectClass > static_cast<uint32_t>(OBJECT_CLASS_COUNT)) {
+            return object.objectClass == 0 ? "Sky" : "N/A";
+        }
+        return objectText(static_cast<int>(object.objectClass) - 1, -1, object.center, object.size, object.yaw);
+    }
+    if (!hasPredictedObjects()) {
+        return "N/A (the model has no object output)";
+    }
+    const ObjectPixel &pixel = m_predictedObjects[i];
+    if (pixel.objectClass >= OBJECT_CLASS_COUNT) {
+        return "Sky";
+    }
+    // box of the camera to the world: x right, y down, z forward
+    double center[3], size[3], front[3];
+    // the heading of the learner is the front of the object in the camera (ImageSamples::getObjectTable()), its forward
+    // part is shorter by the cosine of the pitch of the camera, so the forward is the horizontal forward over the cosine
+    const double cosPitch = std::max(1e-6, std::hypot(m_direction[0], m_direction[2]));
+    for (int k=0;k<3;k++) {
+        center[k] = m_position[k] + MM_PER_METER*(m_right[k]*pixel.center[0] - m_up[k]*pixel.center[1]
+                                                  + m_direction[k]*pixel.center[2]);
+        size[k] = MM_PER_METER*pixel.size[k];
+        const double forward = k == 1 ? 0.0 : m_direction[k]/cosPitch;
+        front[k] = forward*pixel.heading[0]/cosPitch + m_right[k]*pixel.heading[1];
+    }
+    const double yaw = std::atan2(front[0], front[2])*180.0/M_PI;
+    return objectText(pixel.objectClass, pixel.probability, center, size, yaw);
+}
+
+/*!
+ * \brief CameraImage::objectText
+ * \param objectClass class of the model
+ * \param probability percent, -1: not shown
+ * \param center center of the box in the world (mm)
+ * \param size width, height, length of the box (mm)
+ * \param yaw degrees in the world, 0 is +z, positive turns to +x
+ */
+std::string CameraImage::objectText(int objectClass, int probability, const double *center, const double *size,
+                                    double yaw) const
+{
+    char text[256];
+    int length = snprintf(text, sizeof(text), "%s", OBJECT_NAMES[objectClass]);
+    if (probability >= 0) {
+        length += snprintf(text + length, sizeof(text) - static_cast<size_t>(length), " (%d%%)", probability);
+    }
+    if (objectClass < OBJECT_FIRST_BOX_CLASS) {
+        return text;
+    }
+    double squared = 0.0;
+    for (int k=0;k<3;k++) {
+        squared += (center[k] - m_position[k])*(center[k] - m_position[k]);
+    }
+    // heading -180..180 degrees
+    const double heading = yaw - 360.0*std::floor((yaw + 180.0)/360.0);
+    if (objectClass >= OBJECT_FIRST_PERSON_CLASS) {
+        snprintf(text + length, sizeof(text) - static_cast<size_t>(length), ", %.2f m tall, %.1f m away, heading %.0f degrees",
+                 size[1]/MM_PER_METER, std::sqrt(squared)/MM_PER_METER, heading);
+    } else {
+        snprintf(text + length, sizeof(text) - static_cast<size_t>(length),
+                 ", %.2f m long, %.2f m wide, %.2f m high, %.1f m away, heading %.0f degrees", size[2]/MM_PER_METER,
+                 size[0]/MM_PER_METER, size[1]/MM_PER_METER, std::sqrt(squared)/MM_PER_METER, heading);
+    }
+    return text;
 }
 
 const cv::Mat &CameraImage::getImage() const

@@ -7,7 +7,8 @@
 /*!
  * \brief ViewKeyListener
  * Keys of the viewer: 0 moves to the middle of the cameras, 1-9 move to camera 1-9, t changes between
- * the predicted and the correct distances, f fills the black areas or shows them. Left and right arrow keys turn the view while they are down
+ * the predicted and the correct distances, f fills the black areas or shows them, o tints the images by the classes of
+ * the objects or shows the images. Left and right arrow keys turn the view while they are down
  * (direction -1 is left and 1 is right), up and down arrow keys turn it up or down (direction -1 is down
  * and 1 is up). The mouse is handled by the TgMouseCapture of the main window.
  * TgMainWindow sends the events only to its children, so this must be a child of the main window.
@@ -20,6 +21,7 @@ public:
     std::function<void(int index)> onCameraSelected;
     std::function<void()> onToggleDistances;
     std::function<void()> onToggleFillGaps;
+    std::function<void()> onToggleObjects;
     std::function<void(int direction)> onTurnStart;
     std::function<void(int direction)> onTurnStop;
     std::function<void(int direction)> onPitchStart;

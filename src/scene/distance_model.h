@@ -5,13 +5,15 @@
 #include <string>
 #include <vector>
 #include <opencv2/core.hpp>
+#include "camera_image.h"
 #include "network/vision_transformer.h"
 
 /*!
  * \brief DistanceModel
  * vision transformer of prj-camera-image-learner that predicts the distance of every pixel of an image and which pixels
  * are sky, the model must have the sky output. A model with the surface output also predicts which neighbouring pixels
- * are on the same surface (the edges between the surfaces).
+ * are on the same surface (the edges between the surfaces). A model with the object output also predicts the object of
+ * every pixel (its class and the box of a car or a person).
  */
 class DistanceModel
 {
@@ -21,12 +23,15 @@ public:
     bool load(const std::string &filename);
     const std::vector<VisionTransformer::Camera> &getCameras() const;
     // distances (mm) and sky (1) or not (0) of every pixel of an image, connections of every pixel to its right and lower
-    // neighbour (CameraImage::ConnectedRight, ConnectedDown), empty if the model has no surface output
+    // neighbour (CameraImage::ConnectedRight, ConnectedDown), empty if the model has no surface output, object of every
+    // pixel, empty if the model has no object output
     struct Prediction {
         std::vector<double> distances;
         std::vector<uint8_t> sky;
         std::vector<uint8_t> connections;
+        std::vector<CameraImage::ObjectPixel> objects;
     };
+    bool hasObjectOutput() const;
 
     std::vector<Prediction> predict(const std::vector<const cv::Mat *> &images) const;
 

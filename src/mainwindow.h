@@ -34,9 +34,16 @@ private:
     // shows if the black areas are filled
     TgRectangle m_fillBackground;
     TgTextfield m_fillText;
+    // shows if the images are tinted by the classes of the objects (only with the objects)
+    TgRectangle m_objectsBackground;
+    TgTextfield m_objectsText;
+    // object of the picked pixel, below the picked pixel (only with the objects, after the first pick)
+    TgRectangle m_objectBackground;
+    TgTextfield m_objectText;
 
     void updateDistancesText();
     void updateFillText();
+    void updateObjectsText();
 };
 
 #endif

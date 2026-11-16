@@ -218,4 +218,98 @@ PIXEL_LABEL_FUNCTION float twoDistanceLoss(float near, float gap, float choice, 
     return loss;
 }
 
+// object outputs of every pixel (VisionTransformer::Config::objectOutput): OBJECT_CLASS_COUNT logits of the class of
+// the object of the pixel (ground, unknown object (cube, ball, cylinder, cone), sedan, SUV, sports car, man, woman,
+// child, the sky has the sky output), then of a car or a person: the center of its box in the camera (x right, y down,
+// z forward, in OBJECT_CENTER_SCALE m), its heading in the camera (cos and sin of the angle from the forward of the
+// camera to the front of the object, positive toward x, around the y axis of the camera) and the logarithms of the
+// sizes of its box (m). The box gives the type, the size, the place and the heading of the car or the person.
+#define OBJECT_CLASS_COUNT      8
+#define OBJECT_FIRST_BOX_CLASS  2       // classes from the sedan have the box values
+#define OBJECT_CENTER           OBJECT_CLASS_COUNT
+#define OBJECT_HEADING          (OBJECT_CENTER + 3)
+#define OBJECT_SIZE             (OBJECT_HEADING + 2)
+#define OBJECT_OUTPUT_COUNT     (OBJECT_SIZE + 3)
+#define OBJECT_CENTER_SCALE     10.0f
+// object target of every surface number of an image (ImageSamples::getObjectTable()): class (-1: no target, also
+// the sky), center x/y/z, heading cos/sin, logarithms of the sizes x/y/z, like the outputs
+#define OBJECT_TABLE_VALUES     9
+#define OBJECT_TABLE_SIZE       256     // surface numbers of an image that have targets, larger ones have none
+// cross-entropy of the class, Huber loss of the center and squared errors of the heading and the sizes are
+// multiplied by these before they are added to the distance loss
+#define OBJECT_CLASS_LOSS_WEIGHT    0.1f
+#define OBJECT_CENTER_LOSS_WEIGHT   0.1f
+#define OBJECT_HEADING_LOSS_WEIGHT  0.05f
+#define OBJECT_SIZE_LOSS_WEIGHT     0.1f
+#define OBJECT_CENTER_DELTA         0.1f    // Huber delta of the center, 0.1 is 1 m
+
+/*!
+ * \brief objectTarget
+ * \param label PixelLabel of the pixel
+ * \param surface surface number of the pixel
+ * \param table OBJECT_TABLE_SIZE x OBJECT_TABLE_VALUES object targets of the image, nullptr: no targets
+ * \return the OBJECT_TABLE_VALUES target values of the pixel, nullptr if the pixel has no object target
+ */
+PIXEL_LABEL_FUNCTION const float *objectTarget(uint8_t label, int32_t surface, const float *table)
+{
+    if (!table || label != PixelDistance || surface < 0 || surface >= OBJECT_TABLE_SIZE) {
+        return nullptr;
+    }
+    const float *target = table + surface*OBJECT_TABLE_VALUES;
+    return target[0] >= 0.0f ? target : nullptr;
+}
+
+/*!
+ * \brief objectPixelLoss
+ * OBJECT_CLASS_LOSS_WEIGHT*cross-entropy of the class logits and of a car or a person also
+ * OBJECT_CENTER_LOSS_WEIGHT*Huber loss of the center + OBJECT_HEADING_LOSS_WEIGHT*squared error of the heading
+ * + OBJECT_SIZE_LOSS_WEIGHT*squared error of the sizes
+ * \param values OBJECT_OUTPUT_COUNT outputs of the pixel
+ * \param target objectTarget() of the pixel, nullptr: nothing is learned
+ * \param gradient returns OBJECT_OUTPUT_COUNT derivatives of the loss
+ * \return loss
+ */
+PIXEL_LABEL_FUNCTION float objectPixelLoss(const float *values, const float *target, float *gradient)
+{
+    for (int i=0;i<OBJECT_OUTPUT_COUNT;i++) {
+        gradient[i] = 0.0f;
+    }
+    if (!target) {
+        return 0.0f;
+    }
+    const int objectClass = static_cast<int>(target[0]);
+    // softmax cross-entropy: loss = log(sum exp(z)) - z[class], its derivative is softmax(z) - one hot
+    float largest = values[0];
+    for (int i=1;i<OBJECT_CLASS_COUNT;i++) {
+        largest = fmaxf(largest, values[i]);
+    }
+    float sum = 0.0f;
+    for (int i=0;i<OBJECT_CLASS_COUNT;i++) {
+        sum += expf(values[i] - largest);
+    }
+    float loss = OBJECT_CLASS_LOSS_WEIGHT*(logf(sum) + largest - values[objectClass]);
+    for (int i=0;i<OBJECT_CLASS_COUNT;i++) {
+        gradient[i] = OBJECT_CLASS_LOSS_WEIGHT*(expf(values[i] - largest)/sum - (i == objectClass ? 1.0f : 0.0f));
+    }
+    if (objectClass < OBJECT_FIRST_BOX_CLASS) {
+        return loss;
+    }
+    for (int i=0;i<3;i++) {
+        float g;
+        loss += OBJECT_CENTER_LOSS_WEIGHT*distanceLoss(values[OBJECT_CENTER + i] - target[1 + i], OBJECT_CENTER_DELTA, &g);
+        gradient[OBJECT_CENTER + i] = OBJECT_CENTER_LOSS_WEIGHT*g;
+    }
+    for (int i=0;i<2;i++) {
+        const float error = values[OBJECT_HEADING + i] - target[4 + i];
+        loss += OBJECT_HEADING_LOSS_WEIGHT*error*error;
+        gradient[OBJECT_HEADING + i] = OBJECT_HEADING_LOSS_WEIGHT*2.0f*error;
+    }
+    for (int i=0;i<3;i++) {
+        const float error = values[OBJECT_SIZE + i] - target[6 + i];
+        loss += OBJECT_SIZE_LOSS_WEIGHT*error*error;
+        gradient[OBJECT_SIZE + i] = OBJECT_SIZE_LOSS_WEIGHT*2.0f*error;
+    }
+    return loss;
+}
+
 #endif // PIXEL_LABEL_H
