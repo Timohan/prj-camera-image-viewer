@@ -53,21 +53,28 @@ the file name without `_<camera number>.png`, here `objects1_20261108-092717`.
    saved) and the model /mnt/cameras/camera_model/vision_transformer.model, or model/default.model if
    /mnt/cameras has no model (model/default.model is the model of the IDS cameras). The used scene and model are
    printed.
-3. Fisheye pictures (cameraobjects_elp.ini of the creator, saved to /mnt/cameras/fisheye/camera_output): give the
-   directory and the fisheye model, the IDS model cannot predict fisheye pictures:
+3. The objects scenes (cars, people, cubes, balls, cylinders and cones of the training of the objects, 18000 scenes in
+   /mnt/cameras/temporary/camera_output): give the directory, the model and the scene, for example the test scene
+   objects16844 with the objects model of single images:
 
-       ./prj-camera-image-viewer --imageDirectory=/mnt/cameras/fisheye/camera_output --modelFile=default_fisheye.model
+       ./prj-camera-image-viewer --imageDirectory=/mnt/cameras/temporary/camera_output --modelFile=/mnt/camera/camera_training_objects/vision_transformer_objects.model --scene=objects16844_20261114-055139
 
-   default_fisheye.model is the model of the ELP fisheye cameras of this repository.
-4. Another scene: give its name with --scene, for example objects5 of the fisheye pictures:
+   or with the joint model of all cameras when its training is ready
+   (`--modelFile=/mnt/camera/camera_training_joint/vision_transformer_joint.model`, it has also the object ids).
+   The scenes 16200-17999 are the test scenes that the training did not see, result.txt of
+   /mnt/camera/camera_training_objects and /mnt/camera/camera_training_joint has the commands of the best, the median
+   and the worst test scene. Fisheye pictures (cameraobjects_elp.ini of the creator) need the fisheye model
+   `--modelFile=default_fisheye.model` (the ELP fisheye cameras of this repository), the IDS models cannot predict them.
+4. Another scene: give its name with --scene, for example objects17525 of the objects scenes:
 
-       ./prj-camera-image-viewer --imageDirectory=/mnt/cameras/fisheye/camera_output --modelFile=default_fisheye.model --scene=objects5_20261108-092801
+       ./prj-camera-image-viewer --imageDirectory=/mnt/cameras/temporary/camera_output --modelFile=/mnt/camera/camera_training_objects/vision_transformer_objects.model --scene=objects17525_20261114-060631
 
-   (`ls /mnt/cameras/fisheye/camera_output` shows the names). One window shows one scene, close the viewer and
-   open it again for another scene.
+   (`ls /mnt/cameras/temporary/camera_output | grep _1.png` shows the names). One window shows one scene, close the
+   viewer and open it again for another scene.
 5. In the window: the arrow keys turn the view, the mouse wheel moves it, keys 1-6 move to a camera and 0 to the
-   middle of the cameras, 't' changes between the predicted and the correct distances (the .dat files) and a left
-   click shows the distance of a point (see Keys below).
+   middle of the cameras, 't' changes between the predicted and the correct distances (the .dat files), 'o' tints
+   the images by the classes of the objects or every object in its own color and a left click shows the distance and
+   the object of a point (see Keys below).
 
 The model must be of the same cameras as the pictures (positions and lenses), the viewer matches the 6 pictures
 with the cameras of the model before the prediction.
