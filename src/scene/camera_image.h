@@ -7,6 +7,7 @@
 #include <opencv2/core.hpp>
 #include "math/math3d.h"
 #include "network/vision_transformer.h"
+#include "network/sub_surface.h"
 
 /*!
  * \brief CameraImage
@@ -23,6 +24,9 @@
  * car, man, woman, child and the box of a car or a person), the data file has the correct object of every surface
  * ("OBJS" of the newer creator). The object textures are the image tinted by the class of the object of every pixel
  * (OBJECT_COLORS of camera_image.cpp).
+ * Sub-surfaces (network/sub_surface.h of the learner): the true side walls, curved walls, cone walls, round walls, balls,
+ * floor and free-form objects of the pixels, from the data file and the objects file of the scene (ViewerScene), every
+ * sub-surface in its own color, the visible corners white and the corners cut by the floor red.
  */
 class CameraImage
 {
@@ -50,7 +54,8 @@ public:
     enum ObjectsMode {
         ObjectsOff = 0,
         ObjectsClasses,
-        ObjectsIds
+        ObjectsIds,
+        ObjectsSubSurfaces
     };
     static const uint8_t NO_OBJECT = 255;
 
@@ -85,6 +90,15 @@ public:
     std::string objectText(int objectClass, int probability, const double *center, const double *size, double yaw) const;
     // center of the cameras (mean x and z of their positions in the world, mm) for the rig coordinates (worldToRig())
     void setRigCenter(double x, double z);
+    // objects of the surface numbers of the data file for the sub-surfaces (class and box), empty without the objects
+    std::vector<subsurface::Object> getSubSurfaceObjects() const;
+    // world point (mm, 3 values) of every pixel by the correct distances, NaN for the sky and the pixels that see nothing
+    std::vector<double> getCorrectPoints() const;
+    // the true sub-surface id of every pixel (0: none) and the sub-surfaces of the scene (their corners are marked)
+    void setSubSurfaces(const std::vector<uint32_t> &ids, const std::vector<subsurface::Part> *sceneParts);
+    bool hasSubSurfaces() const;
+    // sub-surface id of the pixel, 0: none
+    uint32_t getSubSurfaceId(int x, int y) const;
 
     const cv::Mat &getImage() const;
     int getCameraNumber() const;
@@ -109,6 +123,8 @@ private:
         double center[3] = { 0.0, 0.0, 0.0 };   // center of the box in the world, mm
         double size[3] = { 0.0, 0.0, 0.0 };     // width, height and length of the box, mm
         double yaw = 0.0;                       // degrees, 0 is +z, positive turns to +x
+        double pitch = 0.0;                     // degrees, rotated roll first, then pitch and yaw
+        double roll = 0.0;
     };
     std::vector<uint32_t> m_correctSurfaces;        // surface number of every pixel, empty if the data file has none
     std::vector<CorrectObject> m_correctObjects;    // by the surface number, empty if the data file has no objects
@@ -126,6 +142,9 @@ private:
     GLuint m_correctIdTexture;              // image tinted by the objects, 0 if they are not known
     GLuint m_predictedIdTexture;
     std::vector<int> m_predictedObjectIds;  // predicted object of every pixel, empty without the object ids
+    std::vector<uint32_t> m_subSurfaceIds;  // true sub-surface of every pixel (0: none), empty if not known
+    const std::vector<subsurface::Part> *m_subSurfaces = nullptr;   // sub-surfaces of the scene
+    GLuint m_subSurfaceTexture;             // image tinted by the sub-surfaces with the corners, 0 if not known
     Mesh m_correctMesh;
     Mesh m_predictedMesh;
     Mesh m_correctFillMesh;
@@ -141,6 +160,7 @@ private:
     static void deleteMesh(Mesh *mesh);
     GLuint createTexture(const cv::Mat &image) const;
     cv::Mat tintImage(bool correctObjects, bool ids) const;
+    cv::Mat subSurfaceImage() const;
 };
 
 #endif // CAMERA_IMAGE_H

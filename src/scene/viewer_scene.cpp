@@ -108,6 +108,9 @@ bool ViewerScene::load(const std::string &imageDirectory, const std::string &sce
     for (const auto &image : m_listCameraImage) {
         image->setRigCenter(m_rigCenter[0], m_rigCenter[1]);
     }
+    if (hasCorrectDistances()) {
+        findSubSurfaces((std::filesystem::path(imageDirectory)/(name + "_1.dat")).string());
+    }
     TG_DEBUG_LOG("Scene", name + ":", m_listCameraImage.size(), "cameras,",
                  hasCorrectDistances() ? "correct distances from the data files" : "no data files (no correct distances)");
     std::vector<const cv::Mat *> images;
@@ -422,6 +425,18 @@ std::string ViewerScene::getPickedObjectText() const
         return "Object: N/A";
     }
     const CameraImage &image = *m_listCameraImage[static_cast<size_t>(m_pickedImage)];
+    if (m_objectsMode == CameraImage::ObjectsSubSurfaces) {
+        const uint32_t subSurface = image.getSubSurfaceId(m_pickedPixelX, m_pickedPixelY);
+        for (const subsurface::Part &part : m_subSurfaces) {
+            if (part.id == subSurface) {
+                // all values to the log, they do not fit to the label
+                TG_INFO_LOG("Camera", image.getCameraNumber(), "pixel", m_pickedPixelX, m_pickedPixelY, "sub-surface",
+                            subsurface::describe(part));
+                return "Sub-surface: " + subsurface::summary(part);
+            }
+        }
+        return "Sub-surface: none";
+    }
     const int id = image.getObjectId(m_pickedPixelX, m_pickedPixelY, m_correctDistances);
     if (m_correctDistances) {
         std::string text = "Correct object";
@@ -448,6 +463,61 @@ std::string ViewerScene::getPickedObjectText() const
     const double yaw = std::atan2(group.heading[1], group.heading[0])*180.0/M_PI;
     return "Predicted object " + std::to_string(id + 1) + " (" + cameraList(group.cameras) + "): "
         + image.objectText(objectClass, static_cast<int>(std::lround(100.0*group.probability/count)), center, size, yaw);
+}
+
+/*!
+ * \brief ViewerScene::findSubSurfaces
+ * finds the true sub-surfaces of every image from its correct distances and objects and the objects file of the scene,
+ * without the objects file (or if it does not fit to the data files) there are no sub-surfaces
+ * \param dataFile data file of the first image, the objects file is found from its name
+ */
+void ViewerScene::findSubSurfaces(const std::string &dataFile)
+{
+    const std::string objectsFile = subsurface::objectsFileOf(dataFile);
+    std::error_code error;
+    if (!std::filesystem::exists(objectsFile, error)) {
+        TG_DEBUG_LOG("No sub-surfaces: the objects file", objectsFile, "is missing");
+        return;
+    }
+    std::vector<std::vector<uint32_t>> ids(m_listCameraImage.size());
+    for (size_t i=0;i<m_listCameraImage.size();i++) {
+        const CameraImage &image = *m_listCameraImage[i];
+        std::vector<subsurface::Object> objects = image.getSubSurfaceObjects();
+        std::string reason;
+        if (objects.empty() || image.getCorrectSurfaces().empty()) {
+            continue;
+        }
+        if (!subsurface::setShapes(objectsFile, &objects, &reason)) {
+            TG_DEBUG_LOG("No sub-surfaces:", reason);
+            m_subSurfaces.clear();
+            return;
+        }
+        const std::vector<double> points = image.getCorrectPoints();
+        const std::vector<uint32_t> &surfaces = image.getCorrectSurfaces();
+        std::vector<int32_t> partOfPixel;
+        std::vector<subsurface::Part> parts;
+        subsurface::label(points.data(), surfaces.data(), surfaces.size(), objects, &partOfPixel, &parts);
+        ids[i].assign(partOfPixel.size(), 0);
+        for (size_t pixel=0;pixel<partOfPixel.size();pixel++) {
+            if (partOfPixel[pixel] >= 0) {
+                ids[i][pixel] = parts[static_cast<size_t>(partOfPixel[pixel])].id;
+            }
+        }
+        subsurface::merge(&m_subSurfaces, parts);
+    }
+    for (size_t i=0;i<m_listCameraImage.size();i++) {
+        if (!ids[i].empty()) {
+            m_listCameraImage[i]->setSubSurfaces(ids[i], &m_subSurfaces);
+        }
+    }
+    size_t counts[subsurface::TYPE_COUNT] = {};
+    for (const subsurface::Part &part : m_subSurfaces) {
+        counts[part.type]++;
+    }
+    TG_DEBUG_LOG("Sub-surfaces from", objectsFile + ":", counts[subsurface::TypeSideWall], "side walls,",
+                 counts[subsurface::TypeCurvedWall], "curved walls,", counts[subsurface::TypeConeWall], "cone walls,",
+                 counts[subsurface::TypeRoundWall], "round walls,", counts[subsurface::TypeBall], "balls,",
+                 counts[subsurface::TypeFreeForm], "free-form objects");
 }
 
 /*!
@@ -657,10 +727,13 @@ void ViewerScene::toggleObjects()
     }
     // off, classes, objects (ids: the predicted ones need the object ids of the model, the correct ones are the
     // surface numbers), off
+    // then the true sub-surfaces if they are known
     if (m_objectsMode == CameraImage::ObjectsOff) {
         m_objectsMode = CameraImage::ObjectsClasses;
     } else if (m_objectsMode == CameraImage::ObjectsClasses && (m_objectIds || hasCorrectDistances())) {
         m_objectsMode = CameraImage::ObjectsIds;
+    } else if (m_objectsMode != CameraImage::ObjectsSubSurfaces && !m_subSurfaces.empty()) {
+        m_objectsMode = CameraImage::ObjectsSubSurfaces;
     } else {
         m_objectsMode = CameraImage::ObjectsOff;
     }
@@ -668,7 +741,10 @@ void ViewerScene::toggleObjects()
                      ? "Classes of the objects are shown (other object blue, sedan yellow, SUV orange, sports car red, "
                        "man green, woman magenta, child cyan)"
                      : m_objectsMode == CameraImage::ObjectsIds ? "Every object is shown in its own color"
-                                                                : "Objects are not shown");
+                     : m_objectsMode == CameraImage::ObjectsSubSurfaces
+                         ? "Every true sub-surface is shown in its own color, the corners white, the corners cut by "
+                           "the floor red"
+                         : "Objects are not shown");
 }
 
 /*!

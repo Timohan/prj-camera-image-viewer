@@ -111,8 +111,8 @@ Keys:
   the predicted class, the distance is from the camera to the center of the box, the heading is the yaw of the
   objects file (0 is +z, positive turns to +x). The model predicts the box at every pixel, so the pixels of one car can
   give a little different boxes.
-- o changes the tint of the images: off (default), the classes of the objects, every object in its own color, off
-  (the label at the top left corner shows it, only with the objects): the predicted objects with the predicted
+- o changes the tint of the images: off (default), the classes of the objects, every object in its own color, the
+  true sub-surfaces, off (the label at the top left corner shows it, only with the objects): the predicted objects with the predicted
   distances, the correct objects of the .dat files with the correct distances. Colors of the classes: other object
   (cube, ball, cylinder, cone) blue, sedan yellow, SUV orange, sports car red, man green, woman magenta, child cyan,
   the ground and the sky are not tinted. Every object in its own color: the correct objects are the surface numbers
@@ -122,6 +122,15 @@ Keys:
   With the object ids a click shows the object of the ids, for example `Predicted object 3 (cameras 1, 3): SUV (95%),
   4.80 m long, ...`: the class of most of its pixels and the mean of the world boxes of all its pixels in all cameras,
   the correct object shows its surface number and the cameras that see it.
+  The true sub-surfaces (`prj-camera-image-learner --subSurfaces`, src/network/sub_surface.h): every side wall of a
+  cube, curved wall (side of a cylinder), cone wall, round wall (end of a cylinder, base of a cone), ball and free-form
+  object (car or person) in its own color (the same in all cameras, the floor is not tinted), on both the correct and
+  the predicted distances. A white cross is a visible corner of a side wall or where the visible part of a curved or
+  cone wall begins or ends, a red cross a corner where the floor cuts the object. They need the .dat files and the
+  objects file of the scene (`<imageDirectory>/../camera_objects/<objects file>.dat`, for example
+  /mnt/cameras/temporary/camera_objects/objects17525.dat for the scene objects17525_20261114-060631), without it the
+  'o' key skips them. A click shows the sub-surface, for example `Sub-surface: side wall +x of the cube (surface 3):
+  4 corners, 2 cut by the floor`, and prints all its values (corners, center, normal, radii, visible angles) to the log.
 
 The camera positions and lenses are from the model (prj-camera-image-learner model file version 7, the training saves
 them), so only the png files are needed, the .dat files are read only for the correct distances if they are there.

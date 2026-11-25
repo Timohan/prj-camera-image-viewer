@@ -28,8 +28,10 @@ enum PixelLabel : uint8_t {
 // (along its ray) is projected into every other camera B of the scene, the predicted distance of B there (bilinear) must
 // be the distance of the point from B (normalized logarithms, Huber loss). Only points that B sees are compared: the
 // true point projected into B hits a pixel with the true distance within CROSS_CAMERA_VISIBLE (logarithm), and the four
-// pixels of the bilinear sample are distance pixels without a depth jump between them.
-// The loss is multiplied by CROSS_CAMERA_LOSS_WEIGHT for every pair of cameras before it is added to the distance loss.
+// pixels of the bilinear sample are distance pixels without a depth jump between them (with the setting crossPredicted
+// the predicted distances and sky decide instead, so it works also without true distances).
+// The loss is multiplied by the weight of the training (crossWeight, default CROSS_CAMERA_LOSS_WEIGHT) for every pair of
+// cameras before it is added to the distance loss.
 #define CROSS_CAMERA_LOSS_WEIGHT    0.25f
 #define CROSS_CAMERA_VISIBLE        0.02f
 

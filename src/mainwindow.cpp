@@ -7,8 +7,8 @@
 #define PIXEL_LABEL_WIDTH           500
 #define DISTANCES_LABEL_WIDTH       260
 #define FILL_LABEL_WIDTH            220
-#define OBJECTS_LABEL_WIDTH         250
-#define OBJECT_LABEL_WIDTH          1220
+#define OBJECTS_LABEL_WIDTH         280
+#define OBJECT_LABEL_WIDTH          1880
 #define LABEL_BACKGROUND_COLOR      30, 80, 200, 255
 #define LABEL_TEXT_COLOR            255, 255, 255
 #define PIXEL_LABEL_START_TEXT      "Click a pixel"
@@ -127,7 +127,8 @@ void MainWindow::updateObjectsText()
 {
     const CameraImage::ObjectsMode mode = m_viewerScene->getObjectsMode();
     m_objectsText.setText(mode == CameraImage::ObjectsClasses ? "Objects: classes"
-                          : mode == CameraImage::ObjectsIds ? "Objects: each object" : "Objects: off");
+                          : mode == CameraImage::ObjectsIds ? "Objects: each object"
+                          : mode == CameraImage::ObjectsSubSurfaces ? "Objects: sub-surfaces" : "Objects: off");
 }
 
 void MainWindow::updateFillText()

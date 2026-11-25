@@ -2,9 +2,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <unordered_map>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -32,6 +34,15 @@ static_assert(DATA_CAMERA_INFO_VALUES == VisionTransformer::CAMERA_VALUE_COUNT, 
 #define DATA_OBJECTS_VERSION        1
 // image colors are mixed this much with the color of the class of the object (object textures)
 #define OBJECT_TINT                 0.55
+// tint of the sub-surfaces, the corner crosses (pixels from the center, the far corners have the smaller cross) and how
+// near a pixel of the sub-surface must be to its corner to show it: CORNER_TOLERANCE_MM + CORNER_TOLERANCE_RATE *
+// distance of the corner from the camera (a pixel of the 248x208 images is about 0.6% of the distance)
+#define SUB_SURFACE_TINT            0.6
+#define CORNER_MARK_RADIUS          2
+#define CORNER_MARK_FAR_RADIUS      1
+#define CORNER_MARK_FAR_MM          8000.0
+#define CORNER_TOLERANCE_MM         20.0
+#define CORNER_TOLERANCE_RATE       0.01
 // undistortPoints iterations and accuracy in pixels like in prj-camera-image-creator
 #define UNDISTORT_MAX_ITERATIONS    200
 #define UNDISTORT_EPSILON_PIXELS    0.001
@@ -81,7 +92,8 @@ CameraImage::CameraImage() :
     m_correctObjectTexture(0),
     m_predictedObjectTexture(0),
     m_correctIdTexture(0),
-    m_predictedIdTexture(0)
+    m_predictedIdTexture(0),
+    m_subSurfaceTexture(0)
 {
 }
 
@@ -92,7 +104,7 @@ CameraImage::~CameraImage()
     deleteMesh(&m_correctFillMesh);
     deleteMesh(&m_predictedFillMesh);
     for (GLuint texture : { m_texture, m_correctObjectTexture, m_predictedObjectTexture, m_correctIdTexture,
-                            m_predictedIdTexture }) {
+                            m_predictedIdTexture, m_subSurfaceTexture }) {
         if (texture) {
             glDeleteTextures(1, &texture);
         }
@@ -243,6 +255,8 @@ bool CameraImage::readData(const std::string &filename)
                         object.size[k] = values[3 + k];
                     }
                     object.yaw = values[6];
+                    object.pitch = values[7];
+                    object.roll = values[8];
                     if (objects.size() <= surface) {
                         objects.resize(static_cast<size_t>(surface) + 1);
                     }
@@ -405,6 +419,143 @@ cv::Mat CameraImage::tintImage(bool correctObjects, bool ids) const
 }
 
 /*!
+ * \brief CameraImage::subSurfaceImage
+ * \return the image tinted by the sub-surfaces (every sub-surface in its own color, the floor is not tinted) with a
+ * cross at the visible corners of the sub-surfaces of the scene: white at a corner of a face or where a curved wall
+ * begins or ends, red at a corner that the floor cuts. A corner is visible if a pixel of its sub-surface is near it.
+ */
+cv::Mat CameraImage::subSurfaceImage() const
+{
+    cv::Mat image = m_image.clone();
+    const int width = image.cols, height = image.rows;
+    std::unordered_map<uint32_t, std::vector<size_t>> pixelsOfId;
+    for (int y=0;y<height;y++) {
+        cv::Vec3b *row = image.ptr<cv::Vec3b>(y);
+        for (int x=0;x<width;x++) {
+            const size_t i = static_cast<size_t>(y)*width + x;
+            const uint32_t id = m_subSurfaceIds[i];
+            if (id == 0) {
+                continue;
+            }
+            pixelsOfId[id].push_back(i);
+            if (id/subsurface::SLOTS == subsurface::SURFACE_FLOOR) {
+                continue;
+            }
+            int color[3];
+            idColor(static_cast<int>(id), color);
+            for (int c=0;c<3;c++) {
+                row[x][c] = static_cast<uint8_t>(std::lround((1.0 - SUB_SURFACE_TINT)*row[x][c] + SUB_SURFACE_TINT*color[c]));
+            }
+        }
+    }
+    if (!m_subSurfaces) {
+        return image;
+    }
+    const std::vector<double> points = getCorrectPoints();
+    for (const subsurface::Part &part : *m_subSurfaces) {
+        const auto found = pixelsOfId.find(part.id);
+        if (found == pixelsOfId.end()) {
+            continue;
+        }
+        for (const subsurface::Corner &corner : part.corners) {
+            const double dx = corner.point[0] - m_position[0], dy = corner.point[1] - m_position[1],
+                         dz = corner.point[2] - m_position[2];
+            const double cornerDistance = std::sqrt(dx*dx + dy*dy + dz*dz);
+            const double tolerance = CORNER_TOLERANCE_MM + CORNER_TOLERANCE_RATE*cornerDistance;
+            const int radius = cornerDistance > CORNER_MARK_FAR_MM ? CORNER_MARK_FAR_RADIUS : CORNER_MARK_RADIUS;
+            double best = tolerance*tolerance;
+            size_t bestPixel = SIZE_MAX;
+            for (size_t i : found->second) {
+                const double *point = points.data() + 3*i;
+                const double ex = point[0] - corner.point[0], ey = point[1] - corner.point[1],
+                             ez = point[2] - corner.point[2];
+                const double distance = ex*ex + ey*ey + ez*ez;
+                if (distance < best) {
+                    best = distance;
+                    bestPixel = i;
+                }
+            }
+            if (bestPixel == SIZE_MAX) {
+                continue;
+            }
+            const cv::Vec3b color = corner.cut ? cv::Vec3b(255, 40, 40) : cv::Vec3b(255, 255, 255);
+            const int cx = static_cast<int>(bestPixel%width), cy = static_cast<int>(bestPixel/width);
+            for (int d=-radius;d<=radius;d++) {
+                if (cx + d >= 0 && cx + d < width) {
+                    image.at<cv::Vec3b>(cy, cx + d) = color;
+                }
+                if (cy + d >= 0 && cy + d < height) {
+                    image.at<cv::Vec3b>(cy + d, cx) = color;
+                }
+            }
+        }
+    }
+    return image;
+}
+
+/*!
+ * \brief CameraImage::getSubSurfaceObjects
+ * \return the class and the box of the object of every surface number of the data file (the shapes are set by
+ * subsurface::setShapes()), empty if the data file has no objects
+ */
+std::vector<subsurface::Object> CameraImage::getSubSurfaceObjects() const
+{
+    std::vector<subsurface::Object> objects(m_correctObjects.size());
+    for (size_t i=0;i<m_correctObjects.size();i++) {
+        const CorrectObject &correct = m_correctObjects[i];
+        subsurface::Object &object = objects[i];
+        object.objectClass = correct.objectClass;
+        for (int k=0;k<3;k++) {
+            object.center[k] = correct.center[k];
+            object.size[k] = correct.size[k];
+        }
+        object.yaw = correct.yaw;
+        object.pitch = correct.pitch;
+        object.roll = correct.roll;
+    }
+    return objects;
+}
+
+/*!
+ * \brief CameraImage::getCorrectPoints
+ * \return world point (mm, 3 values) of every pixel: the camera position + the correct distance along the ray of the
+ * pixel, NaN for the sky and the pixels that see nothing
+ */
+std::vector<double> CameraImage::getCorrectPoints() const
+{
+    std::vector<double> points(m_correctDistances.size()*3, std::nan(""));
+    for (size_t i=0;i<m_correctDistances.size() && i<m_rays.size();i++) {
+        const double distance = m_correctDistances[i];
+        if (distance <= 0.0 || distance >= SKY_DISTANCE_MM) {
+            continue;
+        }
+        points[3*i] = m_position[0] + distance*static_cast<double>(m_rays[i].x);
+        points[3*i + 1] = m_position[1] + distance*static_cast<double>(m_rays[i].y);
+        points[3*i + 2] = m_position[2] + distance*static_cast<double>(m_rays[i].z);
+    }
+    return points;
+}
+
+void CameraImage::setSubSurfaces(const std::vector<uint32_t> &ids, const std::vector<subsurface::Part> *sceneParts)
+{
+    m_subSurfaceIds = ids;
+    m_subSurfaces = sceneParts;
+}
+
+bool CameraImage::hasSubSurfaces() const
+{
+    return !m_subSurfaceIds.empty();
+}
+
+uint32_t CameraImage::getSubSurfaceId(int x, int y) const
+{
+    if (m_subSurfaceIds.empty() || x < 0 || y < 0 || x >= m_image.cols || y >= m_image.rows) {
+        return 0;
+    }
+    return m_subSurfaceIds[static_cast<size_t>(y)*m_image.cols + x];
+}
+
+/*!
  * \brief CameraImage::createMeshes
  * creates the texture of the image and the meshes of the correct and the predicted distances,
  * opengl context must be current
@@ -422,6 +573,9 @@ int CameraImage::createMeshes(GLint vertexAttribute, GLint textureCoordinateAttr
     }
     if (!m_predictedObjectIds.empty()) {
         m_predictedIdTexture = createTexture(tintImage(false, true));
+    }
+    if (hasSubSurfaces()) {
+        m_subSurfaceTexture = createTexture(subSurfaceImage());
     }
     // without the data file only the predicted distances are known
     if (hasCorrectDistances()) {
@@ -571,6 +725,9 @@ void CameraImage::render(bool correctDistances, bool fillMesh, ObjectsMode objec
         texture = correctDistances ? m_correctObjectTexture : m_predictedObjectTexture;
     } else if (objectsMode == ObjectsIds) {
         texture = correctDistances ? m_correctIdTexture : m_predictedIdTexture;
+    } else if (objectsMode == ObjectsSubSurfaces) {
+        // only the true sub-surfaces are known, they are shown on both meshes
+        texture = m_subSurfaceTexture;
     }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture ? texture : m_texture);

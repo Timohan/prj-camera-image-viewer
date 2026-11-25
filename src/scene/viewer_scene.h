@@ -23,6 +23,9 @@
  * each other are one object (clusterObjects()), so an object that many cameras see is one object, its box is the mean
  * of the world boxes of its pixels. The images can be tinted by the objects (every object in its own color, the
  * correct objects are the surface numbers of the data files).
+ * Sub-surfaces: the true sub-surfaces of the pixels (network/sub_surface.h of the learner) from the data files and the
+ * objects file of the scene (<imageDirectory>/../camera_objects/<objects file>.dat), merged over all cameras, the images
+ * can be tinted by them and the picked pixel shows its sub-surface.
  */
 class ViewerScene
 {
@@ -78,6 +81,9 @@ private:
     std::vector<uint32_t> m_correctObjectCameras;
 
     void clusterObjects();
+    // true sub-surfaces of the scene, merged over all images
+    std::vector<subsurface::Part> m_subSurfaces;
+    void findSubSurfaces(const std::string &dataFile);
     static std::string cameraList(uint32_t cameras);
     VECTOR3 m_position;         // view camera, opengl units
     float m_yaw;                // radians, 0 looks to +z, positive turns to +x
