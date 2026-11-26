@@ -1,4 +1,5 @@
 #include "sub_surface.h"
+#include "pixel_label.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -18,6 +19,9 @@ namespace subsurface {
 // the begin and end lines of a curved wall: the heights of the pixels of this share of the visible angles at its ends
 #define EDGE_SHARE              0.05
 #define EDGE_MIN_BINS           3
+// a corner of the convex outline of a side wall is kept if the triangle of it and its neighbours is at least this
+// part of the area of the outline (the steps of the pixels on the edges are removed)
+#define SIMPLIFY_AREA           0.04
 
 static const char *const TYPE_NAMES[TYPE_COUNT] = { "none", "floor", "side wall", "curved wall", "cone wall",
                                                     "round wall", "ball", "free-form" };
@@ -679,6 +683,377 @@ std::string describe(const Part &part)
     text += format("; %zu pixels, distance from it %.1f mm (max %.1f)", part.pixels, residual, part.residualMax);
     const std::string values = geometry(part);
     return values.empty() ? text : text + "; " + values;
+}
+
+// ---- predicted sub-surfaces and their fit
+
+void groupPixels(const float *values, const uint8_t *use, int width, int height, double groupDistance, size_t minPixels,
+                 std::vector<PredictedPart> *parts, std::vector<int32_t> *partOfPixel)
+{
+    const size_t count = static_cast<size_t>(width)*static_cast<size_t>(height);
+    partOfPixel->assign(count, -1);
+    parts->clear();
+    struct Cluster {
+        int type;
+        std::vector<size_t> pixels;
+        double sum[SUB_ID_SIZE];
+        double mean[SUB_ID_SIZE];
+    };
+    std::vector<Cluster> clusters;
+    std::vector<std::vector<int>> clustersOfType(SUB_TYPE_COUNT);
+    const double limit = groupDistance*groupDistance;
+    auto squaredDistance = [](const double *mean, const float *id) {
+        double sum = 0.0;
+        for (int k=0;k<SUB_ID_SIZE;k++) {
+            const double d = mean[k] - static_cast<double>(id[k]);
+            sum += d*d;
+        }
+        return sum;
+    };
+    for (int y=0;y<height;y++) {
+        for (int x=0;x<width;x++) {
+            const size_t i = static_cast<size_t>(y)*static_cast<size_t>(width) + static_cast<size_t>(x);
+            if (!use[i]) {
+                continue;
+            }
+            const float *v = values + i*SUB_SURFACE_OUTPUT_COUNT;
+            int type = 0;
+            for (int k=1;k<SUB_TYPE_COUNT;k++) {
+                if (v[SUB_TYPE + k] > v[SUB_TYPE + type]) {
+                    type = k;
+                }
+            }
+            const float *id = v + SUB_ID;
+            int best = -1;
+            double bestDistance = limit;
+            // the sub-surface of the left or upper neighbour first, most pixels are inside their sub-surface
+            for (int n=0;n<2;n++) {
+                if ((n == 0 && x == 0) || (n == 1 && y == 0)) {
+                    continue;
+                }
+                const int32_t c = (*partOfPixel)[n == 0 ? i - 1 : i - static_cast<size_t>(width)];
+                if (c >= 0 && clusters[static_cast<size_t>(c)].type == type) {
+                    const double d = squaredDistance(clusters[static_cast<size_t>(c)].mean, id);
+                    if (d < bestDistance) {
+                        bestDistance = d;
+                        best = c;
+                    }
+                }
+            }
+            if (best < 0) {
+                for (int c : clustersOfType[static_cast<size_t>(type)]) {
+                    const double d = squaredDistance(clusters[static_cast<size_t>(c)].mean, id);
+                    if (d < bestDistance) {
+                        bestDistance = d;
+                        best = c;
+                    }
+                }
+            }
+            if (best < 0) {
+                Cluster cluster;
+                cluster.type = type;
+                std::fill(cluster.sum, cluster.sum + SUB_ID_SIZE, 0.0);
+                std::fill(cluster.mean, cluster.mean + SUB_ID_SIZE, 0.0);
+                clusters.push_back(cluster);
+                best = static_cast<int>(clusters.size() - 1);
+                clustersOfType[static_cast<size_t>(type)].push_back(best);
+            }
+            Cluster &cluster = clusters[static_cast<size_t>(best)];
+            cluster.pixels.push_back(i);
+            for (int k=0;k<SUB_ID_SIZE;k++) {
+                cluster.sum[k] += static_cast<double>(id[k]);
+                cluster.mean[k] = cluster.sum[k]/static_cast<double>(cluster.pixels.size());
+            }
+            (*partOfPixel)[i] = best;
+        }
+    }
+    std::vector<int32_t> index(clusters.size(), -1);
+    for (size_t c=0;c<clusters.size();c++) {
+        const Cluster &cluster = clusters[c];
+        if (cluster.pixels.size() < minPixels) {
+            continue;
+        }
+        PredictedPart part;
+        part.type = cluster.type;
+        part.pixels = cluster.pixels;
+        std::copy(cluster.mean, cluster.mean + SUB_ID_SIZE, part.id);
+        // the axis has no direction: every axis is turned toward the axis of the first pixel before the mean
+        const float *first = values + cluster.pixels[0]*SUB_SURFACE_OUTPUT_COUNT + SUB_AXIS;
+        for (size_t pixel : cluster.pixels) {
+            const float *v = values + pixel*SUB_SURFACE_OUTPUT_COUNT;
+            const double dot = static_cast<double>(v[SUB_AXIS])*first[0] + static_cast<double>(v[SUB_AXIS + 1])*first[1]
+                               + static_cast<double>(v[SUB_AXIS + 2])*first[2];
+            const double sign = dot < 0.0 ? -1.0 : 1.0;
+            for (int k=0;k<3;k++) {
+                part.axis[k] += sign*static_cast<double>(v[SUB_AXIS + k]);
+                part.center[k] += static_cast<double>(v[SUB_CENTER + k])*OBJECT_CENTER_SCALE;
+            }
+        }
+        const double length = std::sqrt(part.axis[0]*part.axis[0] + part.axis[1]*part.axis[1] + part.axis[2]*part.axis[2]);
+        for (int k=0;k<3;k++) {
+            part.axis[k] = length > 0.0 ? part.axis[k]/length : (k == 1 ? 1.0 : 0.0);
+            part.center[k] /= static_cast<double>(cluster.pixels.size());
+        }
+        index[c] = static_cast<int32_t>(parts->size());
+        parts->push_back(std::move(part));
+    }
+    for (int32_t &value : *partOfPixel) {
+        if (value >= 0) {
+            value = index[static_cast<size_t>(value)];
+        }
+    }
+}
+
+// eigenvalues (from the largest) and unit eigenvectors (rows) of a symmetric 3x3 matrix, Jacobi rotations
+static void symmetricEigen(const double input[3][3], double values[3], double vectors[3][3])
+{
+    double a[3][3], v[3][3] = { { 1.0, 0.0, 0.0 }, { 0.0, 1.0, 0.0 }, { 0.0, 0.0, 1.0 } };
+    for (int r=0;r<3;r++) {
+        for (int c=0;c<3;c++) {
+            a[r][c] = input[r][c];
+        }
+    }
+    for (int sweep=0;sweep<50;sweep++) {
+        const double off = a[0][1]*a[0][1] + a[0][2]*a[0][2] + a[1][2]*a[1][2];
+        if (off < 1e-30) {
+            break;
+        }
+        for (int p=0;p<2;p++) {
+            for (int q=p + 1;q<3;q++) {
+                if (std::fabs(a[p][q]) < 1e-300) {
+                    continue;
+                }
+                const double theta = (a[q][q] - a[p][p])/(2.0*a[p][q]);
+                const double t = (theta >= 0.0 ? 1.0 : -1.0)/(std::fabs(theta) + std::sqrt(theta*theta + 1.0));
+                const double c = 1.0/std::sqrt(t*t + 1.0), s = t*c;
+                for (int k=0;k<3;k++) {
+                    const double akp = a[k][p], akq = a[k][q];
+                    a[k][p] = c*akp - s*akq;
+                    a[k][q] = s*akp + c*akq;
+                }
+                for (int k=0;k<3;k++) {
+                    const double apk = a[p][k], aqk = a[q][k];
+                    a[p][k] = c*apk - s*aqk;
+                    a[q][k] = s*apk + c*aqk;
+                }
+                for (int k=0;k<3;k++) {
+                    const double vkp = v[k][p], vkq = v[k][q];
+                    v[k][p] = c*vkp - s*vkq;
+                    v[k][q] = s*vkp + c*vkq;
+                }
+            }
+        }
+    }
+    int order[3] = { 0, 1, 2 };
+    std::sort(order, order + 3, [&a](int i, int j) {
+        return a[i][i] > a[j][j];
+    });
+    for (int i=0;i<3;i++) {
+        values[i] = a[order[i]][order[i]];
+        for (int k=0;k<3;k++) {
+            vectors[i][k] = v[k][order[i]];
+        }
+    }
+}
+
+// convex hull of 2D points (Andrew's monotone chain), counter-clockwise
+static std::vector<std::pair<double, double>> convexHull(std::vector<std::pair<double, double>> points)
+{
+    std::sort(points.begin(), points.end());
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+    if (points.size() < 3) {
+        return points;
+    }
+    auto cross = [](const std::pair<double, double> &o, const std::pair<double, double> &a, const std::pair<double, double> &b) {
+        return (a.first - o.first)*(b.second - o.second) - (a.second - o.second)*(b.first - o.first);
+    };
+    std::vector<std::pair<double, double>> hull(2*points.size());
+    size_t k = 0;
+    for (size_t i=0;i<points.size();i++) {
+        while (k >= 2 && cross(hull[k - 2], hull[k - 1], points[i]) <= 0.0) {
+            k--;
+        }
+        hull[k++] = points[i];
+    }
+    for (size_t i=points.size() - 1, lower=k + 1;i>0;i--) {
+        while (k >= lower && cross(hull[k - 2], hull[k - 1], points[i - 1]) <= 0.0) {
+            k--;
+        }
+        hull[k++] = points[i - 1];
+    }
+    hull.resize(k - 1);
+    return hull;
+}
+
+PartFit fitPart(int type, const std::vector<size_t> &pixels, const double *points, const double *axis, const double *center)
+{
+    PartFit fit;
+    if (pixels.size() < 3) {
+        return fit;
+    }
+    const int floorType = SUB_TYPE_FLOOR, sideWall = SUB_TYPE_SIDE_WALL, roundWall = SUB_TYPE_ROUND_WALL;
+    const int curvedWall = SUB_TYPE_CURVED_WALL, coneWall = SUB_TYPE_CONE_WALL;
+    if (type == floorType || type == sideWall || type == roundWall) {
+        double mean[3] = { 0.0, 0.0, 0.0 };
+        for (size_t pixel : pixels) {
+            for (int k=0;k<3;k++) {
+                mean[k] += points[3*pixel + static_cast<size_t>(k)]/static_cast<double>(pixels.size());
+            }
+        }
+        double covariance[3][3] = {};
+        for (size_t pixel : pixels) {
+            const double d[3] = { points[3*pixel] - mean[0], points[3*pixel + 1] - mean[1], points[3*pixel + 2] - mean[2] };
+            for (int r=0;r<3;r++) {
+                for (int c=0;c<3;c++) {
+                    covariance[r][c] += d[r]*d[c];
+                }
+            }
+        }
+        double values[3], vectors[3][3];
+        symmetricEigen(covariance, values, vectors);
+        std::copy(vectors[2], vectors[2] + 3, fit.normal);
+        fit.valid = true;
+        if (type != sideWall) {
+            return fit;
+        }
+        // the outline of the points on the plane
+        std::vector<std::pair<double, double>> plane;
+        plane.reserve(pixels.size());
+        for (size_t pixel : pixels) {
+            const double d[3] = { points[3*pixel] - mean[0], points[3*pixel + 1] - mean[1], points[3*pixel + 2] - mean[2] };
+            plane.emplace_back(d[0]*vectors[0][0] + d[1]*vectors[0][1] + d[2]*vectors[0][2],
+                               d[0]*vectors[1][0] + d[1]*vectors[1][1] + d[2]*vectors[1][2]);
+        }
+        std::vector<std::pair<double, double>> hull = convexHull(plane);
+        auto triangle = [](const std::pair<double, double> &a, const std::pair<double, double> &b,
+                           const std::pair<double, double> &c) {
+            return 0.5*std::fabs((b.first - a.first)*(c.second - a.second) - (b.second - a.second)*(c.first - a.first));
+        };
+        double area = 0.0;
+        for (size_t i=1;i + 1<hull.size();i++) {
+            area += triangle(hull[0], hull[i], hull[i + 1]);
+        }
+        while (hull.size() > 3) {
+            size_t smallest = 0;
+            double smallestArea = std::numeric_limits<double>::infinity();
+            for (size_t i=0;i<hull.size();i++) {
+                const double a = triangle(hull[(i + hull.size() - 1)%hull.size()], hull[i], hull[(i + 1)%hull.size()]);
+                if (a < smallestArea) {
+                    smallestArea = a;
+                    smallest = i;
+                }
+            }
+            if (smallestArea >= SIMPLIFY_AREA*area) {
+                break;
+            }
+            hull.erase(hull.begin() + static_cast<long>(smallest));
+        }
+        for (const auto &corner : hull) {
+            std::vector<double> point(3);
+            for (int k=0;k<3;k++) {
+                point[static_cast<size_t>(k)] = mean[k] + corner.first*vectors[0][k] + corner.second*vectors[1][k];
+            }
+            fit.corners.push_back(point);
+        }
+        return fit;
+    }
+    if ((type != curvedWall && type != coneWall) || !axis || !center) {
+        return fit;
+    }
+    // angles around the axis in a frame u, w perpendicular to it
+    const double *a = axis;
+    const double helper[3] = { std::fabs(a[0]) < 0.9 ? 1.0 : 0.0, std::fabs(a[0]) < 0.9 ? 0.0 : 1.0, 0.0 };
+    double u[3] = { a[1]*helper[2] - a[2]*helper[1], a[2]*helper[0] - a[0]*helper[2], a[0]*helper[1] - a[1]*helper[0] };
+    const double length = std::sqrt(u[0]*u[0] + u[1]*u[1] + u[2]*u[2]);
+    for (double &value : u) {
+        value /= length;
+    }
+    const double w[3] = { a[1]*u[2] - a[2]*u[1], a[2]*u[0] - a[0]*u[2], a[0]*u[1] - a[1]*u[0] };
+    std::vector<long> lowest(ANGLE_BINS, -1), highest(ANGLE_BINS, -1);
+    std::vector<double> lowHeight(ANGLE_BINS), highHeight(ANGLE_BINS);
+    for (size_t pixel : pixels) {
+        const double q[3] = { points[3*pixel] - center[0], points[3*pixel + 1] - center[1], points[3*pixel + 2] - center[2] };
+        const double height = q[0]*a[0] + q[1]*a[1] + q[2]*a[2];
+        double angle = std::atan2(q[0]*w[0] + q[1]*w[1] + q[2]*w[2], q[0]*u[0] + q[1]*u[1] + q[2]*u[2])*180.0/M_PI;
+        if (angle < 0.0) {
+            angle += 360.0;
+        }
+        const size_t bin = std::min(static_cast<size_t>(angle), static_cast<size_t>(ANGLE_BINS - 1));
+        if (lowest[bin] < 0 || height < lowHeight[bin]) {
+            lowest[bin] = static_cast<long>(pixel);
+            lowHeight[bin] = height;
+        }
+        if (highest[bin] < 0 || height > highHeight[bin]) {
+            highest[bin] = static_cast<long>(pixel);
+            highHeight[bin] = height;
+        }
+    }
+    // the visible part is outside of the largest gap of empty bins
+    int gapStart = -1, gapLength = 0;
+    for (int start=0;start<ANGLE_BINS;start++) {
+        if (lowest[static_cast<size_t>(start)] >= 0 || lowest[static_cast<size_t>((start + ANGLE_BINS - 1)%ANGLE_BINS)] < 0) {
+            continue;
+        }
+        int gap = 0;
+        while (gap < ANGLE_BINS && lowest[static_cast<size_t>((start + gap)%ANGLE_BINS)] < 0) {
+            gap++;
+        }
+        if (gap > gapLength) {
+            gapLength = gap;
+            gapStart = start;
+        }
+    }
+    fit.valid = true;
+    fit.span = 360.0 - gapLength*360.0/ANGLE_BINS;
+    if (gapLength == 0) {
+        return fit;
+    }
+    const int begin = (gapStart + gapLength)%ANGLE_BINS;
+    const int end = (gapStart + ANGLE_BINS - 1)%ANGLE_BINS;
+    const int visibleBins = ANGLE_BINS - gapLength;
+    const int edgeBins = std::max(EDGE_MIN_BINS, static_cast<int>(std::lround(EDGE_SHARE*visibleBins)));
+    for (int bin : { begin, end }) {
+        long low = -1, high = -1;
+        double lowValue = 0.0, highValue = 0.0;
+        for (int step=0;step<edgeBins && step<visibleBins;step++) {
+            const size_t edge = static_cast<size_t>((bin + (bin == begin ? step : -step) + ANGLE_BINS)%ANGLE_BINS);
+            if (lowest[edge] >= 0 && (low < 0 || lowHeight[edge] < lowValue)) {
+                low = lowest[edge];
+                lowValue = lowHeight[edge];
+            }
+            if (highest[edge] >= 0 && (high < 0 || highHeight[edge] > highValue)) {
+                high = highest[edge];
+                highValue = highHeight[edge];
+            }
+        }
+        for (long pixel : { low, high }) {
+            if (pixel >= 0) {
+                fit.corners.emplace_back(points + 3*pixel, points + 3*pixel + 3);
+            }
+        }
+    }
+    return fit;
+}
+
+double cornerDistance(const std::vector<std::vector<double>> &a, const std::vector<std::vector<double>> &b)
+{
+    if (a.empty() || b.empty()) {
+        return -1.0;
+    }
+    auto oneWay = [](const std::vector<std::vector<double>> &from, const std::vector<std::vector<double>> &to) {
+        double sum = 0.0;
+        for (const std::vector<double> &p : from) {
+            double nearest = std::numeric_limits<double>::infinity();
+            for (const std::vector<double> &q : to) {
+                const double d = std::sqrt((p[0] - q[0])*(p[0] - q[0]) + (p[1] - q[1])*(p[1] - q[1])
+                                           + (p[2] - q[2])*(p[2] - q[2]));
+                nearest = std::min(nearest, d);
+            }
+            sum += nearest;
+        }
+        return sum/static_cast<double>(from.size());
+    };
+    return 0.5*(oneWay(a, b) + oneWay(b, a));
 }
 
 }

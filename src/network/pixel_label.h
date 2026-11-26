@@ -380,4 +380,157 @@ PIXEL_LABEL_FUNCTION float objectPixelLoss(const float *values, const float *tar
     return loss;
 }
 
+// sub-surface outputs of every pixel (VisionTransformer::Config::subSurfaceOutput, after the object outputs), the
+// sub-surfaces of network/sub_surface.h: SUB_TYPE_COUNT logits of the type of the sub-surface of the pixel (floor, side
+// wall, curved wall, cone wall, round wall, ball, free-form: subsurface::Type - 1, the sky has the sky output), then
+// SUB_ID_SIZE values of the id of the sub-surface (the pixels of the same sub-surface of an image have near ids, the
+// means of the sub-surfaces are far from each other: the loss of the ids of the training like the object ids), then of
+// a cube, ball, cylinder or cone: the axis of a cylinder or a cone (unit y axis of the object in the camera, x right,
+// y down, z forward, its sign is not learned), the center of the object in the camera (in OBJECT_CENTER_SCALE m) and the
+// logarithms of its half sizes (m): a cube or a ball the 3 half sizes from the largest, a cylinder or a cone the larger
+// and the smaller radius and the half height. The fit of the predicted sub-surfaces (corners, angles) uses them.
+#define SUB_TYPE_COUNT          7
+// the types (subsurface::Type - 1)
+#define SUB_TYPE_FLOOR          0
+#define SUB_TYPE_SIDE_WALL      1
+#define SUB_TYPE_CURVED_WALL    2
+#define SUB_TYPE_CONE_WALL      3
+#define SUB_TYPE_ROUND_WALL     4
+#define SUB_TYPE_BALL           5
+#define SUB_TYPE_FREE_FORM      6
+#define SUB_TYPE                0
+#define SUB_ID                  (SUB_TYPE + SUB_TYPE_COUNT)
+#define SUB_ID_SIZE             8
+#define SUB_AXIS                (SUB_ID + SUB_ID_SIZE)
+#define SUB_CENTER              (SUB_AXIS + 3)
+#define SUB_SIZE                (SUB_CENTER + 3)
+#define SUB_SURFACE_OUTPUT_COUNT (SUB_SIZE + 3)
+// sub-surface target of every surface number of an image (ImageSamples::getSubSurfaceTable()): the kind of the object
+// (-1: no target), axis x/y/z, center x/y/z and the logarithms of the half sizes like the outputs; the face of every
+// pixel (CompactImages::getFaces(), the index of subsurface::Part, SUB_FACE_NONE: none) selects the sub-surface
+#define SUB_KIND_FLOOR          0
+#define SUB_KIND_CUBE           1
+#define SUB_KIND_BALL           2
+#define SUB_KIND_CYLINDER       3
+#define SUB_KIND_CONE           4
+#define SUB_KIND_FREE_FORM      5
+#define SUB_TABLE_KIND          0
+#define SUB_TABLE_AXIS          1
+#define SUB_TABLE_CENTER        4
+#define SUB_TABLE_SIZES         7
+#define SUB_TABLE_VALUES        10
+#define SUB_TABLE_SIZE          OBJECT_TABLE_SIZE   // surface numbers of an image that have targets
+#define SUB_FACES               8                   // faces of an object (subsurface::SLOTS), the instances of the ids
+#define SUB_FACE_NONE           255
+// cross-entropy of the type, squared error of the axis, Huber loss of the center, squared errors of the sizes and the
+// loss of the ids are multiplied by these before they are added to the distance loss (the sub-surface loss)
+#define SUB_TYPE_LOSS_WEIGHT    0.1f
+#define SUB_AXIS_LOSS_WEIGHT    0.05f
+#define SUB_CENTER_LOSS_WEIGHT  0.1f
+#define SUB_SIZE_LOSS_WEIGHT    0.1f
+#define SUB_ID_LOSS_WEIGHT      0.1f
+
+/*!
+ * \brief subSurfaceType
+ * \param kind SUB_KIND_* of the object of the pixel
+ * \param face face of the pixel (subsurface::Part::index)
+ * \return type of the sub-surface 0..SUB_TYPE_COUNT - 1 (subsurface::Type - 1), -1 if none
+ */
+PIXEL_LABEL_FUNCTION int subSurfaceType(int kind, int face)
+{
+    switch (kind) {
+    case SUB_KIND_FLOOR: return SUB_TYPE_FLOOR;
+    case SUB_KIND_CUBE: return SUB_TYPE_SIDE_WALL;
+    case SUB_KIND_BALL: return SUB_TYPE_BALL;
+    case SUB_KIND_CYLINDER: return face == 0 ? SUB_TYPE_CURVED_WALL : SUB_TYPE_ROUND_WALL;
+    case SUB_KIND_CONE: return face == 0 ? SUB_TYPE_CONE_WALL : SUB_TYPE_ROUND_WALL;
+    case SUB_KIND_FREE_FORM: return SUB_TYPE_FREE_FORM;
+    default: return -1;
+    }
+}
+
+/*!
+ * \brief subSurfaceTarget
+ * \param label PixelLabel of the pixel
+ * \param surface surface number of the pixel
+ * \param face face of the pixel, SUB_FACE_NONE: none
+ * \param table SUB_TABLE_SIZE x SUB_TABLE_VALUES sub-surface targets of the image, nullptr: no targets
+ * \return the SUB_TABLE_VALUES target values of the object of the pixel, nullptr if the pixel has no sub-surface target
+ */
+PIXEL_LABEL_FUNCTION const float *subSurfaceTarget(uint8_t label, int32_t surface, uint8_t face, const float *table)
+{
+    if (!table || label != PixelDistance || surface < 0 || surface >= SUB_TABLE_SIZE || face == SUB_FACE_NONE) {
+        return nullptr;
+    }
+    const float *target = table + surface*SUB_TABLE_VALUES;
+    return target[SUB_TABLE_KIND] >= 0.0f ? target : nullptr;
+}
+
+/*!
+ * \brief subSurfacePixelLoss
+ * SUB_TYPE_LOSS_WEIGHT*cross-entropy of the type logits, of a cube, ball, cylinder or cone also
+ * SUB_CENTER_LOSS_WEIGHT*Huber loss of the center + SUB_SIZE_LOSS_WEIGHT*squared error of the sizes and of a cylinder or
+ * a cone SUB_AXIS_LOSS_WEIGHT*squared error of the axis (to the target or its opposite, the nearer one); the ids have no
+ * loss here (the loss of the ids of the training sees all pixels of the image)
+ * \param values SUB_SURFACE_OUTPUT_COUNT outputs of the pixel
+ * \param target subSurfaceTarget() of the pixel, nullptr: nothing is learned
+ * \param face face of the pixel
+ * \param gradient returns SUB_SURFACE_OUTPUT_COUNT derivatives of the loss
+ * \return loss
+ */
+PIXEL_LABEL_FUNCTION float subSurfacePixelLoss(const float *values, const float *target, uint8_t face, float *gradient)
+{
+    for (int i=0;i<SUB_SURFACE_OUTPUT_COUNT;i++) {
+        gradient[i] = 0.0f;
+    }
+    if (!target) {
+        return 0.0f;
+    }
+    const int kind = static_cast<int>(target[SUB_TABLE_KIND]);
+    const int type = subSurfaceType(kind, face);
+    if (type < 0) {
+        return 0.0f;
+    }
+    float largest = values[SUB_TYPE];
+    for (int i=1;i<SUB_TYPE_COUNT;i++) {
+        largest = fmaxf(largest, values[SUB_TYPE + i]);
+    }
+    float sum = 0.0f;
+    for (int i=0;i<SUB_TYPE_COUNT;i++) {
+        sum += expf(values[SUB_TYPE + i] - largest);
+    }
+    float loss = SUB_TYPE_LOSS_WEIGHT*(logf(sum) + largest - values[SUB_TYPE + type]);
+    for (int i=0;i<SUB_TYPE_COUNT;i++) {
+        gradient[SUB_TYPE + i] = SUB_TYPE_LOSS_WEIGHT*(expf(values[SUB_TYPE + i] - largest)/sum - (i == type ? 1.0f : 0.0f));
+    }
+    if (kind == SUB_KIND_FLOOR || kind == SUB_KIND_FREE_FORM) {
+        return loss;
+    }
+    for (int i=0;i<3;i++) {
+        float g;
+        loss += SUB_CENTER_LOSS_WEIGHT*distanceLoss(values[SUB_CENTER + i] - target[SUB_TABLE_CENTER + i],
+                                                    OBJECT_CENTER_DELTA, &g);
+        gradient[SUB_CENTER + i] = SUB_CENTER_LOSS_WEIGHT*g;
+        const float error = values[SUB_SIZE + i] - target[SUB_TABLE_SIZES + i];
+        loss += SUB_SIZE_LOSS_WEIGHT*error*error;
+        gradient[SUB_SIZE + i] = SUB_SIZE_LOSS_WEIGHT*2.0f*error;
+    }
+    if (kind == SUB_KIND_CYLINDER || kind == SUB_KIND_CONE) {
+        // the axis has no direction: the error to the nearer of the target and its opposite
+        float plus = 0.0f, minus = 0.0f;
+        for (int i=0;i<3;i++) {
+            const float a = values[SUB_AXIS + i] - target[SUB_TABLE_AXIS + i];
+            const float b = values[SUB_AXIS + i] + target[SUB_TABLE_AXIS + i];
+            plus += a*a;
+            minus += b*b;
+        }
+        const float sign = plus <= minus ? 1.0f : -1.0f;
+        loss += SUB_AXIS_LOSS_WEIGHT*fminf(plus, minus);
+        for (int i=0;i<3;i++) {
+            gradient[SUB_AXIS + i] = SUB_AXIS_LOSS_WEIGHT*2.0f*(values[SUB_AXIS + i] - sign*target[SUB_TABLE_AXIS + i]);
+        }
+    }
+    return loss;
+}
+
 #endif // PIXEL_LABEL_H

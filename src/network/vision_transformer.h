@@ -31,6 +31,9 @@
  * The output weights of the refine step start from 0, so the refine step starts as no correction.
  * With twoDistances the pixel head gives a near and a far distance and a choice logit, the output distance is
  * the chosen one (chosenDistance() of pixel_label.h), so an edge pixel is the near or the far surface instead of their mean.
+ * With subSurfaceOutput the pixel head gives also the sub-surface of every pixel after the object values
+ * (SUB_SURFACE_OUTPUT_COUNT values of pixel_label.h): its type, the id of the sub-surface, the axis, the center and the
+ * sizes of its cube, ball, cylinder or cone.
  * With objectOutput the pixel head gives also the object of every pixel (OBJECT_OUTPUT_COUNT values of pixel_label.h):
  * the class of the object (ground, unknown object, sedan, SUV, sports car, man, woman, child) and of a car or a person
  * the center, the heading and the sizes of its box in the camera. With objectIds also the center and the heading of
@@ -74,7 +77,10 @@ public:
         int jointEvery = 1;         // with cameraGroup > 1 every jointEvery'th block is joint (1: all blocks)
         bool objectIds = false;     // true: the object outputs have also the world box and the id of the object
                                     // (objectOutputCount() of pixel_label.h), needs objectOutput, trained on the GPU
+        bool subSurfaceOutput = false;  // true: every pixel has also the sub-surface outputs (SUB_SURFACE_OUTPUT_COUNT of
+                                        // pixel_label.h) after the object outputs, needs objectOutput, trained on the GPU
         int objectValues() const { return objectOutput ? objectOutputCount(objectIds) : 0; }
+        int subSurfaceValues() const { return subSurfaceOutput ? SUB_SURFACE_OUTPUT_COUNT : 0; }
         int inputChannels() const { return 3 + geoInputs; }
         // true if the block l sees the tokens of all images of the scene
         bool jointLayer(int l) const { return cameraGroup > 1 && jointEvery > 0 && (l + 1)%jointEvery == 0; }
@@ -168,13 +174,14 @@ public:
     int getParameterTensorCount() const;
     std::vector<float> &getParameter(int parameter);
     void forward(Workspace *workspace, const float *image, float *output, float *skyOutput = nullptr,
-                 float *surfaceOutput = nullptr, float *objectOutput = nullptr) const;
+                 float *surfaceOutput = nullptr, float *objectOutput = nullptr, float *subSurfaceOutput = nullptr) const;
     // outputs of the images of one scene (forwardGroup()), every pointer can be nullptr, the lists can be empty
     struct GroupOutputs {
         std::vector<float *> output;
         std::vector<float *> skyOutput;
         std::vector<float *> surfaceOutput;
         std::vector<float *> objectOutput;
+        std::vector<float *> subSurfaceOutput;
     };
     void forwardGroup(const std::vector<Workspace *> &workspaces, const std::vector<const float *> &images,
                       const GroupOutputs &outputs, int threadCount) const;
@@ -244,7 +251,7 @@ private:
     void blockStartForward(Workspace *workspace, int l) const;
     void blockEndForward(Workspace *workspace, int l) const;
     void headForward(Workspace *workspace, const float *image, float *output, float *skyOutput, float *surfaceOutput,
-                     float *objectOutput) const;
+                     float *objectOutput, float *subSurfaceOutput) const;
     void attentionBackward(const Workspace::Layer &layer, const float *attentionGradient, float *qkvGradient,
                            float *rowBuffer) const;
     void pixelWindows(const float *image, float *pixelInputs) const;
@@ -255,6 +262,9 @@ private:
     int skyOffset() const;
     static const int m_surfaceOffset = 2;   // surface outputs of the pixel head are after the distance and the sky
     static const int m_objectOffset = 2 + SURFACE_OUTPUT_COUNT;     // object outputs are after the surface outputs
+public:
+    // sub-surface outputs of the pixel head are after the object outputs
+    int subSurfaceOffset() const { return m_objectOffset + m_config.objectValues(); }
 };
 
 #endif // VISION_TRANSFORMER_H

@@ -28,8 +28,8 @@
 // version 5 has the refine step size (refineHidden, refineWindow), version 6 has the two distances flag,
 // version 7 has the cameras after the weight tensors, version 8 has the geo inputs (geoInputs),
 // version 9 has the object output flag (objectOutput), version 10 has the joint model (cameraGroup, jointEvery) and the
-// object ids (objectIds)
-#define MODEL_FILE_VERSION  10
+// object ids (objectIds), version 11 has the sub-surface output flag (subSurfaceOutput)
+#define MODEL_FILE_VERSION  11
 // a model file cannot have more cameras than this
 #define MODEL_MAX_CAMERAS   1000
 
@@ -58,7 +58,7 @@ VisionTransformer::VisionTransformer(const Config &config, unsigned int seed) :
                                              : (config.skyOutput ? 2*m_patchOutputCount : m_patchOutputCount)),
     m_pixelInputCount(config.pixelWindow*config.pixelWindow*3),
     m_pixelOutputCount((config.skyOutput ? 2 : 1) + (config.surfaceOutput ? SURFACE_OUTPUT_COUNT : 0)
-                       + config.objectValues() + (config.twoDistances ? 2 : 0)),
+                       + config.objectValues() + config.subSurfaceValues() + (config.twoDistances ? 2 : 0)),
     m_refineInputCount(config.refineWindow*config.refineWindow*config.pixelHidden),
     m_pixelWeight(-1), m_pixelBias(-1), m_pixelOutWeight(-1), m_pixelOutBias(-1),
     m_refineWeight(-1), m_refineBias(-1), m_refineOutWeight(-1), m_refineOutBias(-1),
@@ -182,9 +182,11 @@ const float *VisionTransformer::value(int parameter) const
  * surface values (pixel_label.h)
  * \param objectOutput if not nullptr and the network has the object output, returns height x width x
  * Config::objectValues() object values (pixel_label.h)
+ * \param subSurfaceOutput if not nullptr and the network has the sub-surface output, returns height x width x
+ * SUB_SURFACE_OUTPUT_COUNT sub-surface values (pixel_label.h)
  */
 void VisionTransformer::forward(Workspace *workspace, const float *image, float *output, float *skyOutput,
-                                float *surfaceOutput, float *objectOutput) const
+                                float *surfaceOutput, float *objectOutput, float *subSurfaceOutput) const
 {
     if (m_config.cameraGroup > 1) {
         throw std::logic_error("the joint model predicts the images of a scene together (forwardGroup())");
@@ -195,7 +197,7 @@ void VisionTransformer::forward(Workspace *workspace, const float *image, float 
         attentionForward(&workspace->m_layers[static_cast<size_t>(l)]);
         blockEndForward(workspace, l);
     }
-    headForward(workspace, image, output, skyOutput, surfaceOutput, objectOutput);
+    headForward(workspace, image, output, skyOutput, surfaceOutput, objectOutput, subSurfaceOutput);
 }
 
 /*!
@@ -262,7 +264,8 @@ void VisionTransformer::forwardGroup(const std::vector<Workspace *> &workspaces,
     }
     parallel(count, [&](int i) {
         headForward(workspaces[static_cast<size_t>(i)], images[static_cast<size_t>(i)], pointer(outputs.output, i),
-                    pointer(outputs.skyOutput, i), pointer(outputs.surfaceOutput, i), pointer(outputs.objectOutput, i));
+                    pointer(outputs.skyOutput, i), pointer(outputs.surfaceOutput, i), pointer(outputs.objectOutput, i),
+                    pointer(outputs.subSurfaceOutput, i));
     });
 }
 
@@ -346,7 +349,7 @@ void VisionTransformer::blockEndForward(Workspace *workspace, int l) const
  * final layer norm, head (and pixel head, refine step) and the outputs of the pixels like forward()
  */
 void VisionTransformer::headForward(Workspace *workspace, const float *image, float *output, float *skyOutput,
-                                    float *surfaceOutput, float *objectOutput) const
+                                    float *surfaceOutput, float *objectOutput, float *subSurfaceOutput) const
 {
     const int patchSize = m_config.patchSize;
     const int columns = m_config.width/patchSize;
@@ -359,6 +362,7 @@ void VisionTransformer::headForward(Workspace *workspace, const float *image, fl
     const bool sky = m_config.skyOutput && skyOutput;
     const bool surface = m_config.surfaceOutput && surfaceOutput;
     const bool object = m_config.objectOutput && objectOutput;
+    const bool subSurface = m_config.subSurfaceOutput && subSurfaceOutput;
     if (m_config.pixelHidden > 0) {
         // pixel head: hidden = token part + linear(colors around the pixel), output = linear(gelu(hidden))
         const int rows = count*m_patchOutputCount;
@@ -406,6 +410,10 @@ void VisionTransformer::headForward(Workspace *workspace, const float *image, fl
             if (object) {
                 std::copy_n(values + m_objectOffset, m_config.objectValues(),
                             objectOutput + pixel*static_cast<size_t>(m_config.objectValues()));
+            }
+            if (subSurface) {
+                std::copy_n(values + subSurfaceOffset(), SUB_SURFACE_OUTPUT_COUNT,
+                            subSurfaceOutput + pixel*SUB_SURFACE_OUTPUT_COUNT);
             }
         }
     }
@@ -567,8 +575,8 @@ double VisionTransformer::backward(Workspace *workspace, const float *target, co
                                    const float *normals, const int32_t *surfaces, double *surfaceLoss,
                                    const float *objectTable, double *objectLoss) const
 {
-    if (m_config.cameraGroup > 1 || m_config.objectIds) {
-        throw std::logic_error("the joint model and the object ids are trained on the GPU");
+    if (m_config.cameraGroup > 1 || m_config.objectIds || m_config.subSurfaceOutput) {
+        throw std::logic_error("the joint model, the object ids and the sub-surfaces are trained on the GPU");
     }
     const int patchSize = m_config.patchSize;
     const int columns = m_config.width/patchSize;
@@ -1148,12 +1156,12 @@ const std::vector<VisionTransformer::Camera> &VisionTransformer::getCameras() co
 /*!
  * \brief VisionTransformer::save
  * saves the network to a binary file (native byte order, little-endian on x86):
- * char[4] "VITM", uint32_t version (10), int32_t width, height, patchSize, dimension, heads, layers, mlpDimension,
+ * char[4] "VITM", uint32_t version (11), int32_t width, height, patchSize, dimension, heads, layers, mlpDimension,
  * skyOutput (0 or 1, missing in version 1 files), pixelHidden, pixelWindow (missing in version 1 and 2 files),
  * surfaceOutput (0 or 1, missing in version 1-3 files), refineHidden, refineWindow (missing in version 1-4 files),
  * twoDistances (0 or 1, missing in version 1-5 files), geoInputs (missing in version 1-7 files),
  * objectOutput (0 or 1, missing in version 1-8 files), cameraGroup, jointEvery, objectIds (0 or 1)
- * (missing in version 1-9 files),
+ * (missing in version 1-9 files), subSurfaceOutput (0 or 1, missing in version 1-10 files),
  * float targetMean, targetScale (distance = exp(output*targetScale + targetMean) meters),
  * uint32_t count of the weight tensors, then for every tensor uint32_t count of the values and the float values,
  * uint32_t count of the cameras (missing in version 1-6 files), then for every camera uint32_t number, width, height,
@@ -1199,6 +1207,7 @@ bool VisionTransformer::save(const std::string &filename, float targetMean, floa
         writeInt32(m_config.cameraGroup);
         writeInt32(m_config.jointEvery);
         writeInt32(m_config.objectIds ? 1 : 0);
+        writeInt32(m_config.subSurfaceOutput ? 1 : 0);
         writeFloat(targetMean);
         writeFloat(targetScale);
         writeUint32(static_cast<uint32_t>(m_parameters.size()));
@@ -1312,6 +1321,12 @@ std::unique_ptr<VisionTransformer> VisionTransformer::load(const std::string &fi
         config.jointEvery = joint[1];
         config.objectIds = joint[2] != 0;
     }
+    // versions 1-10 have no sub-surface output
+    if (version >= 11) {
+        int32_t subSurfaceOutput = 0;
+        file.read(reinterpret_cast<char *>(&subSurfaceOutput), sizeof(subSurfaceOutput));
+        config.subSurfaceOutput = subSurfaceOutput != 0;
+    }
     file.read(reinterpret_cast<char *>(targetMean), sizeof(*targetMean));
     file.read(reinterpret_cast<char *>(targetScale), sizeof(*targetScale));
     file.read(reinterpret_cast<char *>(&tensorCount), sizeof(tensorCount));
@@ -1329,7 +1344,7 @@ std::unique_ptr<VisionTransformer> VisionTransformer::load(const std::string &fi
         || (config.geoInputs != 0 && config.geoInputs != GEO_INPUT_COUNT)
         || (config.objectOutput && !config.surfaceOutput)
         || config.cameraGroup < 1 || config.cameraGroup > static_cast<int>(MODEL_MAX_CAMERAS) || config.jointEvery < 1
-        || (config.objectIds && !config.objectOutput)) {
+        || (config.objectIds && !config.objectOutput) || (config.subSurfaceOutput && !config.objectOutput)) {
         TG_ERROR_LOG(filename, "has an invalid network size");
         return nullptr;
     }

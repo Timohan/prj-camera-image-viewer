@@ -128,6 +128,39 @@ void merge(std::vector<Part> *sceneParts, const std::vector<Part> &imageParts);
 // visible angles and corners from the pixels
 void finish(Part *part);
 
+// ---- predicted sub-surfaces (the sub-surface outputs of a model, pixel_label.h) and their fit
+
+// a predicted sub-surface: pixels of the same predicted type whose ids are near each other
+struct PredictedPart {
+    int type = -1;                  // 0..SUB_TYPE_COUNT - 1 (Type - 1)
+    std::vector<size_t> pixels;
+    double id[8] = {};              // means of the outputs of the pixels (SUB_ID_SIZE)
+    double axis[3] = {};            // the axes are turned to the same direction before the mean, unit length
+    double center[3] = {};          // m (the outputs are in OBJECT_CENTER_SCALE m)
+};
+// joins the pixels that have use[i] != 0 (values: SUB_SURFACE_OUTPUT_COUNT outputs of every pixel, width x height) to
+// predicted sub-surfaces: a pixel joins the sub-surface of its type whose mean id is nearest if it is nearer than
+// groupDistance, otherwise it starts a new one; the sub-surfaces of fewer than minPixels pixels are dropped,
+// partOfPixel gets the index of the sub-surface of every pixel (-1: none)
+void groupPixels(const float *values, const uint8_t *use, int width, int height, double groupDistance, size_t minPixels,
+                 std::vector<PredictedPart> *parts, std::vector<int32_t> *partOfPixel);
+
+// geometry of the pixels of a sub-surface from their points (the same fit for the predicted and the true pixels):
+// a side wall, round wall or floor a plane (least squares), a side wall also the corners of its visible part (the
+// convex outline of its points on the plane without the corners that cut less than SIMPLIFY_AREA of its area); a curved
+// wall or a cone wall the visible angle around the axis (through center) and where the visible part begins and ends
+// (the lowest and highest point along the axis of the first and last angles)
+struct PartFit {
+    bool valid = false;
+    double normal[3] = { 0.0, 0.0, 0.0 };
+    std::vector<std::vector<double>> corners;   // 3 values each, in the units of the points
+    double span = 0.0;                          // degrees
+};
+PartFit fitPart(int type, const std::vector<size_t> &pixels, const double *points, const double *axis, const double *center);
+// mean distance of the corners of a from the nearest corner of b and of b from a (in the units of the points),
+// negative if either has none
+double cornerDistance(const std::vector<std::vector<double>> &a, const std::vector<std::vector<double>> &b);
+
 // one line description, lengths in m, for example "side wall 3 of a cube (surface 12): 5 corners, 2 cut by the floor"
 std::string summary(const Part &part);
 // the geometry, lengths in m: the corners (side wall), where the visible part begins and ends (curved and cone wall),
